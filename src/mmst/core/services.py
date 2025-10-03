@@ -111,3 +111,7 @@ class CoreServices:
     @property
     def config_store(self) -> ConfigStore:
         return self._config_store
+
+    def get_app_config(self) -> PluginConfig:
+        """Return the configuration bucket reserved for core dashboard state."""
+        return self._config_store.get_plugin("__dashboard__")

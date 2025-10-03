@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import platform
 from copy import deepcopy
 from datetime import datetime
 from functools import partial
@@ -41,13 +42,13 @@ try:  # pragma: no cover - optional dependency
     from mutagen import MutagenError  # type: ignore[import-not-found]
     from mutagen.wave import WAVE  # type: ignore[import-not-found]
     from mutagen.id3 import (  # type: ignore[import-not-found]
-        COMM,
-        ID3,
-        ID3NoHeaderError,
-        TALB,
-        TCON,
-        TIT2,
-        TPE1,
+        COMM,  # type: ignore[attr-defined]
+        ID3,  # type: ignore[attr-defined]
+        ID3NoHeaderError,  # type: ignore[attr-defined]
+        TALB,  # type: ignore[attr-defined]
+        TCON,  # type: ignore[attr-defined]
+        TIT2,  # type: ignore[attr-defined]
+        TPE1,  # type: ignore[attr-defined]
     )
 except Exception:  # pragma: no cover - missing runtime dependency
     MutagenError = Exception  # type: ignore[assignment]
@@ -79,6 +80,8 @@ def _format_filesize(size_bytes: int) -> str:
     if idx == 0:
         return f"{int(size)} {units[idx]}"
     return f"{size:0.1f} {units[idx]}"
+
+
 class EqualizerPanel(QWidget):
     def __init__(self, plugin: "AudioToolsPlugin", bus: str, parent: Optional[QWidget] = None) -> None:
         super().__init__(parent)
@@ -483,12 +486,22 @@ class RecorderPanel(QWidget):
         super().__init__(parent)
         self._plugin = plugin
         self._loading = False
+        self._current_mode = "input"
 
         layout = QVBoxLayout(self)
         layout.setSpacing(8)
 
         device_box = QGroupBox("Aufnahmequelle")
         device_form = QFormLayout(device_box)
+        self.source_mode_combo = QComboBox()
+        self.source_mode_combo.addItem("Mikrofon / Line-In", "input")
+        self.source_mode_combo.addItem("Desktop-Audio (Loopback)", "loopback")
+        self.source_mode_combo.currentIndexChanged.connect(self._on_source_mode_changed)
+        if platform.system() != "Windows":
+            loopback_index = self.source_mode_combo.findData("loopback")
+            if loopback_index != -1:
+                self.source_mode_combo.removeItem(loopback_index)
+        device_form.addRow("Modus", self.source_mode_combo)
         self.device_combo = QComboBox()
         self.device_combo.currentIndexChanged.connect(self._on_device_changed)
         device_form.addRow("Gerät", self.device_combo)
@@ -553,8 +566,21 @@ class RecorderPanel(QWidget):
     def refresh(self) -> None:
         self._loading = True
         try:
-            devices = self._plugin.get_devices("input")
-            selected = self._plugin.get_recorder_device()
+            mode = self._plugin.get_recorder_mode()
+            self._current_mode = mode
+            index = self.source_mode_combo.findData(mode)
+            if index != -1:
+                self.source_mode_combo.setCurrentIndex(index)
+            else:
+                if self.source_mode_combo.count() > 0:
+                    fallback = self.source_mode_combo.itemData(0)
+                    if isinstance(fallback, str):
+                        self._plugin.set_recorder_mode(fallback)
+                        mode = fallback
+                        self._current_mode = mode
+                        self.source_mode_combo.setCurrentIndex(0)
+            devices = self._plugin.get_devices("output" if mode == "loopback" else "input")
+            selected = self._plugin.get_recorder_device(mode)
             self.device_combo.clear()
             for device in devices:
                 label = self._plugin.describe_device(device)
@@ -568,7 +594,7 @@ class RecorderPanel(QWidget):
             if not selected and self.device_combo.count():
                 device_id = self.device_combo.currentData()
                 if isinstance(device_id, str):
-                    self._plugin.set_recorder_device(device_id)
+                    self._plugin.set_recorder_device(device_id, mode)
             self.output_dir_edit.setText(self._plugin.get_output_directory())
             notice = self._plugin.get_device_backend_notice()
             if notice:
@@ -588,7 +614,17 @@ class RecorderPanel(QWidget):
             return
         device_id = self.device_combo.currentData()
         if isinstance(device_id, str):
-            self._plugin.set_recorder_device(device_id)
+            self._plugin.set_recorder_device(device_id, self._current_mode)
+
+    def _on_source_mode_changed(self) -> None:
+        if self._loading:
+            return
+        mode = self.source_mode_combo.currentData()
+        if not isinstance(mode, str):
+            return
+        self._current_mode = mode
+        self._plugin.set_recorder_mode(mode)
+        self.refresh()
 
     def _choose_output_dir(self) -> None:
         directory = QFileDialog.getExistingDirectory(self, "Zielordner auswählen")
@@ -930,12 +966,54 @@ class AudioToolsPlugin(BasePlugin):
         entry["values"] = self._normalize_values(values)
         self._persist_eq_state()
 
-    def get_recorder_device(self) -> Optional[str]:
-        value = self._recorder_state.get("selected_device")
+    def get_recorder_mode(self) -> str:
+        value = self._recorder_state.get("source_mode")
+        if isinstance(value, str) and value in {"input", "loopback"}:
+            return value
+        return "input"
+
+    def set_recorder_mode(self, mode: str) -> None:
+        normalized = mode if mode in {"input", "loopback"} else "input"
+        if self._recorder_state.get("source_mode") != normalized:
+            self._recorder_state["source_mode"] = normalized
+            self._persist_recorder_state()
+
+    def _selected_devices_map(self) -> Dict[str, str]:
+        mapping_any = self._recorder_state.get("selected_devices")
+        if not isinstance(mapping_any, dict):
+            mapping_any = {}
+            self._recorder_state["selected_devices"] = mapping_any
+
+        mapping: Dict[str, str] = {}
+        for key, value in list(mapping_any.items()):
+            if isinstance(key, str) and isinstance(value, str):
+                mapping[key] = value
+            else:
+                mapping_any.pop(key, None)
+
+        legacy = self._recorder_state.pop("selected_device", None)
+        if isinstance(legacy, str) and "input" not in mapping:
+            mapping["input"] = legacy
+
+        mapping_any.clear()
+        mapping_any.update(mapping)
+        return cast(Dict[str, str], mapping_any)
+
+    def get_recorder_device(self, mode: Optional[str] = None) -> Optional[str]:
+        if mode is None:
+            mode = self.get_recorder_mode()
+        mapping = self._selected_devices_map()
+        value = mapping.get(mode)
         return str(value) if isinstance(value, str) else None
 
-    def set_recorder_device(self, device_id: str) -> None:
-        self._recorder_state["selected_device"] = device_id
+    def set_recorder_device(self, device_id: str, mode: Optional[str] = None) -> None:
+        if mode is None:
+            mode = self.get_recorder_mode()
+        mapping = self._selected_devices_map()
+        mapping[mode] = device_id
+        self._recorder_state["selected_devices"] = mapping
+        if mode == "input":
+            self._recorder_state["selected_device"] = device_id
         self._persist_recorder_state()
 
     def get_output_directory(self) -> str:
@@ -969,17 +1047,38 @@ class AudioToolsPlugin(BasePlugin):
         self._persist_recorder_state()
 
     def get_recording_history(self) -> List[Dict[str, Any]]:
-        records = []
         metadata_store = self._ensure_metadata_store()
+        cleaned: List[Dict[str, Any]] = []
+        dirty = False
+
         for entry in self._history_records():
             record = dict(entry)
-            path = record.get("path")
-            if isinstance(path, str) and path in metadata_store:
-                record["metadata"] = dict(metadata_store[path])
+            path_str = record.get("path")
+            path_obj = Path(path_str) if isinstance(path_str, str) else None
+
+            if path_obj and not path_obj.exists():
+                if isinstance(path_str, str):
+                    metadata_store.pop(path_str, None)
+                dirty = True
+                continue
+
+            if isinstance(path_str, str) and path_str in metadata_store:
+                record["metadata"] = dict(metadata_store[path_str])
             elif not isinstance(record.get("metadata"), dict):
                 record["metadata"] = {}
-            records.append(record)
-        return records
+
+            cleaned.append(record)
+
+        if dirty:
+            history_obj = self._recorder_state.setdefault("history", [])
+            if isinstance(history_obj, list):
+                history_obj.clear()
+                history_obj.extend(dict(item) for item in cleaned)
+            else:
+                self._recorder_state["history"] = [dict(item) for item in cleaned]
+            self._persist_recorder_state()
+
+        return cleaned
 
     def is_recording(self) -> bool:
         return self._recording.is_recording()
@@ -1079,12 +1178,13 @@ class AudioToolsPlugin(BasePlugin):
         self._persist_recorder_state()
 
     def start_recording(self) -> Path:
-        device_id = self.get_recorder_device()
+        mode = self.get_recorder_mode()
+        device_id = self.get_recorder_device(mode)
         if not device_id:
             raise RecordingError("Es ist kein Aufnahmegerät ausgewählt")
         output_dir = Path(self.get_output_directory())
         quality = self.get_quality_settings()
-        path = self._recording.start(output_dir, device_id, quality)
+        path = self._recording.start(output_dir, device_id, quality, mode=mode)
         self._current_recording_path = path
         return path
 
@@ -1120,6 +1220,9 @@ class AudioToolsPlugin(BasePlugin):
         if not isinstance(existing_metadata, dict):
             existing_metadata = {}
             metadata_store[path_str] = existing_metadata
+        capture_mode_raw = info.get("capture_mode")
+        capture_mode = str(capture_mode_raw) if isinstance(capture_mode_raw, str) else "input"
+
         entry = {
             "filename": path.name,
             "duration": _format_duration(duration_seconds),
@@ -1127,6 +1230,7 @@ class AudioToolsPlugin(BasePlugin):
             "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
             "path": path_str,
             "metadata": dict(existing_metadata),
+            "mode": capture_mode,
         }
         history = self._recorder_state.setdefault("history", [])
         history.insert(0, entry)
@@ -1284,7 +1388,7 @@ class AudioToolsPlugin(BasePlugin):
         if tags is None:
             if ID3 is not None:
                 tags = ID3()
-                audio.tags = tags
+                audio.tags = tags  # type: ignore[assignment]
             else:
                 return
         try:
@@ -1422,6 +1526,8 @@ class AudioToolsPlugin(BasePlugin):
     def _normalize_recorder(self, data: Dict[str, Any]) -> Dict[str, Any]:
         recorder = {
             "selected_device": None,
+            "selected_devices": {},
+            "source_mode": "input",
             "output_dir": "",
             "quality": self._default_quality(),
             "history": [],
@@ -1432,6 +1538,19 @@ class AudioToolsPlugin(BasePlugin):
         device = data.get("selected_device")
         if isinstance(device, str):
             recorder["selected_device"] = device
+            recorder.setdefault("selected_devices", {})
+            if isinstance(recorder["selected_devices"], dict):
+                recorder["selected_devices"]["input"] = device
+        selected_devices = data.get("selected_devices")
+        if isinstance(selected_devices, dict):
+            normalized_devices: Dict[str, str] = {}
+            for mode, identifier in selected_devices.items():
+                if isinstance(mode, str) and isinstance(identifier, str):
+                    normalized_devices[mode] = identifier
+            recorder["selected_devices"] = normalized_devices
+        mode_value = data.get("source_mode")
+        if isinstance(mode_value, str) and mode_value in {"input", "loopback"}:
+            recorder["source_mode"] = mode_value
         output_dir = data.get("output_dir")
         if isinstance(output_dir, str):
             recorder["output_dir"] = output_dir

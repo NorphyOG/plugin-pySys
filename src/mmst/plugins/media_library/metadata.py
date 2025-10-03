@@ -11,23 +11,36 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Union
+from typing import TYPE_CHECKING, Any, Dict, List, Optional, Union
 
 try:
-    from mutagen import File as MutagenFile
+    from mutagen._file import File as MutagenFile
     from mutagen.easyid3 import EasyID3
     from mutagen.flac import FLAC
-    from mutagen.id3 import ID3, ID3NoHeaderError
+    from mutagen.id3 import ID3
+    from mutagen.id3._util import ID3NoHeaderError
     from mutagen.mp4 import MP4
     MUTAGEN_AVAILABLE = True
 except ImportError:
+    MutagenFile = None  # type: ignore[assignment]
+    EasyID3 = None  # type: ignore[assignment]
+    FLAC = None  # type: ignore[assignment]
+    ID3 = None  # type: ignore[assignment]
+    ID3NoHeaderError = None  # type: ignore[assignment]
+    MP4 = None  # type: ignore[assignment]
     MUTAGEN_AVAILABLE = False
 
 try:
     from pymediainfo import MediaInfo
     PYMEDIAINFO_AVAILABLE = True
 except ImportError:
+    MediaInfo = None  # type: ignore[assignment]
     PYMEDIAINFO_AVAILABLE = False
+
+if TYPE_CHECKING:
+    from mutagen.easyid3 import EasyID3 as EasyID3Type
+else:
+    EasyID3Type = Any
 
 
 @dataclass
@@ -156,6 +169,10 @@ class MetadataReader:
         if not self.mutagen_available:
             metadata.format = "audio"
             return
+
+        if MutagenFile is None:
+            metadata.format = "audio"
+            return
         
         try:
             audio = MutagenFile(str(file_path), easy=True)
@@ -231,6 +248,10 @@ class MetadataReader:
     def _read_video(self, file_path: Path, metadata: MediaMetadata) -> None:
         """Read video file metadata using pymediainfo."""
         if not self.pymediainfo_available:
+            metadata.format = "video"
+            return
+
+        if MediaInfo is None:
             metadata.format = "video"
             return
         
@@ -333,49 +354,205 @@ class MetadataWriter:
         """Write audio metadata using mutagen."""
         if not self.mutagen_available:
             return False
-        
+
+        suffix = file_path.suffix.lower()
+
         try:
-            audio = MutagenFile(str(file_path), easy=True)
-            if audio is None:
-                return False
-            
-            # Clear existing tags and set new ones
-            if not hasattr(audio, "tags") or audio.tags is None:
-                audio.add_tags()
-            
-            # Set fields
-            self._set_tag(audio.tags, "title", metadata.title)
-            self._set_tag(audio.tags, "artist", metadata.artist)
-            self._set_tag(audio.tags, "album", metadata.album)
-            self._set_tag(audio.tags, "albumartist", metadata.album_artist)
-            self._set_tag(audio.tags, "genre", metadata.genre)
-            self._set_tag(audio.tags, "comment", metadata.comment)
-            self._set_tag(audio.tags, "composer", metadata.composer)
-            
-            # Year
+            if suffix == ".mp3":
+                return self._write_mp3(file_path, metadata)
+            if suffix == ".flac":
+                return self._write_flac(file_path, metadata)
+            if suffix == ".ogg":
+                return self._write_vorbis(file_path, metadata)
+            if suffix == ".m4a":
+                return self._write_mp4(file_path, metadata)
+        except Exception:
+            return False
+        return False
+
+    def _write_mp3(self, file_path: Path, metadata: MediaMetadata) -> bool:
+        if EasyID3 is None or MutagenFile is None or ID3 is None or ID3NoHeaderError is None:
+            return False
+        try:
+            try:
+                tags = EasyID3(str(file_path))
+            except ID3NoHeaderError:
+                audio = MutagenFile(str(file_path))
+                if audio is None:
+                    audio = ID3()
+                    audio.save(str(file_path))
+                else:
+                    audio.add_tags()
+                    audio.save()
+                tags = EasyID3(str(file_path))
+
+            self._set_easy_tag(tags, "title", metadata.title)
+            self._set_easy_tag(tags, "artist", metadata.artist)
+            self._set_easy_tag(tags, "album", metadata.album)
+            self._set_easy_tag(tags, "albumartist", metadata.album_artist)
+            self._set_easy_tag(tags, "genre", metadata.genre)
+            self._set_easy_tag(tags, "comment", metadata.comment)
+            self._set_easy_tag(tags, "composer", metadata.composer)
+
             if metadata.year:
-                self._set_tag(audio.tags, "date", str(metadata.year))
-            
-            # Track number
+                self._set_easy_tag(tags, "date", str(metadata.year))
+            else:
+                self._clear_easy_tag(tags, "date")
+
             if metadata.track_number:
-                if metadata.track_total:
-                    track_str = f"{metadata.track_number}/{metadata.track_total}"
-                else:
-                    track_str = str(metadata.track_number)
-                self._set_tag(audio.tags, "tracknumber", track_str)
-            
-            # Disc number
+                track_value = f"{metadata.track_number}/{metadata.track_total}" if metadata.track_total else str(metadata.track_number)
+                self._set_easy_tag(tags, "tracknumber", track_value)
+            else:
+                self._clear_easy_tag(tags, "tracknumber")
+
             if metadata.disc_number:
-                if metadata.disc_total:
-                    disc_str = f"{metadata.disc_number}/{metadata.disc_total}"
-                else:
-                    disc_str = str(metadata.disc_number)
-                self._set_tag(audio.tags, "discnumber", disc_str)
-            
+                disc_value = f"{metadata.disc_number}/{metadata.disc_total}" if metadata.disc_total else str(metadata.disc_number)
+                self._set_easy_tag(tags, "discnumber", disc_value)
+            else:
+                self._clear_easy_tag(tags, "discnumber")
+
+            tags.save()
+            return True
+        except Exception:
+            return False
+
+    def _write_flac(self, file_path: Path, metadata: MediaMetadata) -> bool:
+        if FLAC is None:
+            return False
+        try:
+            audio = FLAC(str(file_path))
+        except Exception:
+            return False
+
+        self._set_mutagen_list_tag(audio, "title", metadata.title)
+        self._set_mutagen_list_tag(audio, "artist", metadata.artist)
+        self._set_mutagen_list_tag(audio, "album", metadata.album)
+        self._set_mutagen_list_tag(audio, "albumartist", metadata.album_artist)
+        self._set_mutagen_list_tag(audio, "genre", metadata.genre)
+        self._set_mutagen_list_tag(audio, "comment", metadata.comment)
+        self._set_mutagen_list_tag(audio, "composer", metadata.composer)
+
+        if metadata.year:
+            audio["date"] = [str(metadata.year)]
+        elif "date" in audio:
+            del audio["date"]
+
+        if metadata.track_number:
+            audio["tracknumber"] = [str(metadata.track_number)]
+        elif "tracknumber" in audio:
+            del audio["tracknumber"]
+
+        if metadata.track_total:
+            audio["totaltracks"] = [str(metadata.track_total)]
+        elif "totaltracks" in audio:
+            del audio["totaltracks"]
+
+        if metadata.disc_number:
+            audio["discnumber"] = [str(metadata.disc_number)]
+        elif "discnumber" in audio:
+            del audio["discnumber"]
+
+        if metadata.disc_total:
+            audio["totaldiscs"] = [str(metadata.disc_total)]
+        elif "totaldiscs" in audio:
+            del audio["totaldiscs"]
+
+        try:
             audio.save()
             return True
-        
-        except Exception as exc:
+        except Exception:
+            return False
+
+    def _write_vorbis(self, file_path: Path, metadata: MediaMetadata) -> bool:
+        if MutagenFile is None:
+            return False
+
+        audio = MutagenFile(str(file_path))
+        if audio is None or not hasattr(audio, "tags"):
+            return False
+
+        self._set_mutagen_list_tag(audio, "title", metadata.title)
+        self._set_mutagen_list_tag(audio, "artist", metadata.artist)
+        self._set_mutagen_list_tag(audio, "album", metadata.album)
+        self._set_mutagen_list_tag(audio, "albumartist", metadata.album_artist)
+        self._set_mutagen_list_tag(audio, "genre", metadata.genre)
+        self._set_mutagen_list_tag(audio, "comment", metadata.comment)
+        self._set_mutagen_list_tag(audio, "composer", metadata.composer)
+
+        if metadata.year:
+            audio["date"] = [str(metadata.year)]
+        elif "date" in audio:
+            del audio["date"]
+
+        if metadata.track_number:
+            audio["tracknumber"] = [str(metadata.track_number)]
+        elif "tracknumber" in audio:
+            del audio["tracknumber"]
+
+        if metadata.track_total:
+            audio["totaltracks"] = [str(metadata.track_total)]
+        elif "totaltracks" in audio:
+            del audio["totaltracks"]
+
+        if metadata.disc_number:
+            audio["discnumber"] = [str(metadata.disc_number)]
+        elif "discnumber" in audio:
+            del audio["discnumber"]
+
+        if metadata.disc_total:
+            audio["totaldiscs"] = [str(metadata.disc_total)]
+        elif "totaldiscs" in audio:
+            del audio["totaldiscs"]
+
+        try:
+            audio.save()
+            return True
+        except Exception:
+            return False
+
+    def _write_mp4(self, file_path: Path, metadata: MediaMetadata) -> bool:
+        if MP4 is None:
+            return False
+        try:
+            audio = MP4(str(file_path))
+        except Exception:
+            return False
+
+        mapping = {
+            "\u00a9nam": metadata.title,
+            "\u00a9ART": metadata.artist,
+            "\u00a9alb": metadata.album,
+            "aART": metadata.album_artist,
+            "\u00a9gen": metadata.genre,
+            "\u00a9cmt": metadata.comment,
+            "\u00a9wrt": metadata.composer,
+        }
+
+        for key, value in mapping.items():
+            if value:
+                audio[key] = [value]
+            elif key in audio:
+                del audio[key]
+
+        if metadata.year:
+            audio["\u00a9day"] = [str(metadata.year)]
+        elif "\u00a9day" in audio:
+            del audio["\u00a9day"]
+
+        if metadata.track_number:
+            audio["trkn"] = [(metadata.track_number, metadata.track_total or 0)]
+        elif "trkn" in audio:
+            del audio["trkn"]
+
+        if metadata.disc_number:
+            audio["disk"] = [(metadata.disc_number, metadata.disc_total or 0)]
+        elif "disk" in audio:
+            del audio["disk"]
+
+        try:
+            audio.save()
+            return True
+        except Exception:
             return False
     
     def _write_video(self, file_path: Path, metadata: MediaMetadata) -> bool:
@@ -393,4 +570,26 @@ class MetadataWriter:
             elif key in tags:
                 del tags[key]
         except (KeyError, AttributeError, TypeError):
+            pass
+
+    def _set_easy_tag(self, tags: EasyID3Type, key: str, value: Optional[str]) -> None:
+        if value is None or value == "":
+            self._clear_easy_tag(tags, key)
+            return
+        tags[key] = [value]
+
+    def _clear_easy_tag(self, tags: EasyID3Type, key: str) -> None:
+        try:
+            if key in tags:
+                del tags[key]
+        except KeyError:
+            pass
+
+    def _set_mutagen_list_tag(self, tags: Any, key: str, value: Optional[str]) -> None:
+        try:
+            if value:
+                tags[key] = [value]
+            elif key in tags:
+                del tags[key]
+        except Exception:
             pass

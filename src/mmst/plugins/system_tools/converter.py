@@ -13,6 +13,7 @@ class ConversionJob:
     source_format: str
     target_format: str
     tool: str
+    command_path: Optional[Path] = None
 
 
 @dataclass
@@ -64,8 +65,10 @@ class FileConverter:
         """Convert audio/video using ffmpeg."""
         job.target.parent.mkdir(parents=True, exist_ok=True)
         
+        command = str(job.command_path) if job.command_path else "ffmpeg"
+
         cmd = [
-            "ffmpeg",
+            command,
             "-i", str(job.source),
             "-y",  # overwrite output
             str(job.target),
@@ -131,11 +134,16 @@ class FileConverter:
         """Convert images using ImageMagick."""
         job.target.parent.mkdir(parents=True, exist_ok=True)
         
-        import platform
-        if platform.system() == "Windows":
-            cmd = ["magick", "convert", str(job.source), str(job.target)]
+        command = str(job.command_path) if job.command_path else None
+
+        if command:
+            cmd = [command, str(job.source), str(job.target)]
         else:
-            cmd = ["convert", str(job.source), str(job.target)]
+            import platform
+            if platform.system() == "Windows":
+                cmd = ["magick", str(job.source), str(job.target)]
+            else:
+                cmd = ["convert", str(job.source), str(job.target)]
 
         if progress:
             progress(f"Starte ImageMagick: {job.source.name} → {job.target.name}")

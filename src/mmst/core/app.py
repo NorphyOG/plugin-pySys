@@ -73,6 +73,7 @@ class DashboardWindow(QMainWindow):
         self._services = services
         self._manager = manager
         self._views: Dict[str, PluginView] = {}
+        self._app_settings = self._services.get_app_config()
 
         self.setWindowTitle("MMST Dashboard")
         self.resize(1200, 760)
@@ -133,8 +134,11 @@ class DashboardWindow(QMainWindow):
 
         self._services.notifications.subscribe(self._on_notification)
 
+        self._restore_window_settings()
+
         self._populate_plugins()
-        if self.plugin_list.count() > 0:
+        restored = self._restore_dashboard_state()
+        if not restored and self.plugin_list.count() > 0:
             self.plugin_list.setCurrentRow(0)
             self._auto_start_selected()
 
@@ -187,6 +191,102 @@ class DashboardWindow(QMainWindow):
         self.stop_button.setEnabled(record.state == PluginState.STARTED)
         self.configure_button.setEnabled(record.instance is not None)
 
+    def _restore_window_settings(self) -> None:
+        size = self._app_settings.get("window_size", None)
+        if isinstance(size, (list, tuple)) and len(size) == 2:
+            try:
+                width, height = int(size[0]), int(size[1])
+            except (TypeError, ValueError):
+                width = height = 0
+            if width > 0 and height > 0:
+                self.resize(width, height)
+
+        position = self._app_settings.get("window_pos", None)
+        if isinstance(position, (list, tuple)) and len(position) == 2:
+            try:
+                x, y = int(position[0]), int(position[1])
+            except (TypeError, ValueError):
+                x = y = None
+            else:
+                if x is not None and y is not None:
+                    self.move(x, y)
+
+        if bool(self._app_settings.get("window_maximized", False)):
+            self.showMaximized()
+
+    def _update_app_settings(self, **kwargs: Any) -> None:
+        payload: Dict[str, Any] = {}
+        for key, value in kwargs.items():
+            current = self._app_settings.get(key, None)
+            if current != value:
+                payload[key] = value
+        if payload:
+            self._app_settings.update(payload)
+
+    def _restore_dashboard_state(self) -> bool:
+        restored = False
+        started_plugins = self._app_settings.get("started_plugins", [])
+        if isinstance(started_plugins, list):
+            for identifier in started_plugins:
+                if not isinstance(identifier, str):
+                    continue
+                record = self._manager.get(identifier)
+                if not record or record.state == PluginState.STARTED:
+                    continue
+                state = self._manager.start(identifier)
+                self._refresh_record(identifier)
+                if state == PluginState.STARTED:
+                    restored = True
+
+        selected = self._app_settings.get("selected_plugin")
+        if isinstance(selected, str):
+            if self._select_plugin(selected):
+                restored = True
+
+        self._persist_started_plugins()
+        return restored
+
+    def _select_plugin(self, identifier: str) -> bool:
+        for index in range(self.plugin_list.count()):
+            item = self.plugin_list.item(index)
+            if item and item.data(Qt.UserRole) == identifier:  # type: ignore[attr-defined]
+                self.plugin_list.setCurrentRow(index)
+                return True
+        return False
+
+    def _persist_started_plugins(self) -> None:
+        started = [
+            record.manifest.identifier
+            for record in self._manager.iter_plugins()
+            if record.state == PluginState.STARTED
+        ]
+        self._update_app_settings(started_plugins=started)
+
+    def _remember_selection(self) -> None:
+        self._update_app_settings(selected_plugin=self._current_identifier())
+
+    def _save_dashboard_state(self) -> None:
+        rect = self.normalGeometry() if self.isMaximized() else self.geometry()
+        if rect.width() <= 0 or rect.height() <= 0:
+            size_obj = self.size()
+            pos_obj = self.pos()
+        else:
+            size_obj = rect.size()
+            pos_obj = rect.topLeft()
+
+        state = {
+            "window_size": [int(size_obj.width()), int(size_obj.height())],
+            "window_pos": [int(pos_obj.x()), int(pos_obj.y())],
+            "window_maximized": self.isMaximized(),
+            "selected_plugin": self._current_identifier(),
+            "started_plugins": [
+                record.manifest.identifier
+                for record in self._manager.iter_plugins()
+                if record.state == PluginState.STARTED
+            ],
+        }
+        self._update_app_settings(**state)
+
     def _on_plugin_selected(self, current: Optional[QListWidgetItem]) -> None:
         record = self._current_record()
         self._update_buttons(record)
@@ -195,6 +295,7 @@ class DashboardWindow(QMainWindow):
             self.view_stack.setCurrentWidget(widget)
         else:
             self.view_stack.setCurrentIndex(0)
+        self._remember_selection()
 
     def _start_selected(self) -> None:
         record = self._current_record()
@@ -210,6 +311,7 @@ class DashboardWindow(QMainWindow):
             self.view_stack.setCurrentIndex(0)
             self._show_error(record)
         self._update_buttons(self._current_record())
+        self._persist_started_plugins()
 
     def _auto_start_selected(self) -> None:
         record = self._current_record()
@@ -228,6 +330,7 @@ class DashboardWindow(QMainWindow):
             self.view_stack.setCurrentIndex(0)
             self._show_error(record)
         self._update_buttons(self._current_record())
+        self._persist_started_plugins()
 
     def _stop_selected(self) -> None:
         record = self._current_record()
@@ -238,6 +341,7 @@ class DashboardWindow(QMainWindow):
         self.view_stack.setCurrentIndex(0)
         self._set_status(f"{record.manifest.name} gestoppt")
         self._update_buttons(self._current_record())
+        self._persist_started_plugins()
 
     def _configure_selected(self) -> None:
         record = self._current_record()
@@ -274,6 +378,7 @@ class DashboardWindow(QMainWindow):
     # Qt events
     # ------------------------------------------------------------------
     def closeEvent(self, event) -> None:  # type: ignore[override]
+        self._save_dashboard_state()
         self._services.notifications.unsubscribe(self._on_notification)
         self._manager.shutdown()
         super().closeEvent(event)

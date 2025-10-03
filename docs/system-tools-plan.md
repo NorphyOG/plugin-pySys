@@ -1,5 +1,8 @@
 # Projektplan: Modulares Medien- & System-Toolkit (MMST)
 
+**Version: 3.0**
+**Letzte Aktualisierung: 2025-10-03**
+
 ## 1. Vision & Ziele
 
 Das MMST soll eine plattformübergreifende (Windows & Linux) Python-Anwendung werden, die eine Vielzahl von Medien- und Systemaufgaben über eine einheitliche, plugin-basierte Architektur zugänglich macht. Der Fokus liegt auf Erweiterbarkeit, Benutzerfreundlichkeit und mächtigen Werkzeugen für Power-User.
@@ -7,8 +10,8 @@ Das MMST soll eine plattformübergreifende (Windows & Linux) Python-Anwendung we
 **Kernprinzipien:**
 
 - **Modularität:** Jede Kernfunktion ist ein eigenständiges Plugin.
-- **Performance:** Langwierige Operationen (Scannen, Konvertieren) blockieren niemals die Benutzeroberfläche.
-- **Plattformunabhängigkeit:** Wo immer möglich, wird plattformunabhängiger Code verwendet. Wo nicht, werden spezifische Backends mit sauberen Fallbacks implementiert.
+- **Performance:** Langwierige Operationen blockieren niemals die Benutzeroberfläche.
+- **Plattformunabhängigkeit:** Saubere Backends mit generischen Fallbacks.
 - **Transparenz:** Der Nutzer hat stets Kontrolle und Einblick in die Prozesse.
 
 ---
@@ -20,19 +23,24 @@ Das MMST soll eine plattformübergreifende (Windows & Linux) Python-Anwendung we
     - [x] Plugin-Architektur mit `BasePlugin` Interface definiert.
     - [x] Erste UI-Entwürfe für `AudioTools` und `FileManager` erstellt.
 
-2. **Funktionalität der Basis-Plugins:**
+2. **Funktionalität der Basis-Plugins (Abgeschlossen):**
     - [x] **AudioTools:** MVP abgeschlossen (Aufnahme & EQ-Engine mit DSP).
     - [x] **FileManager:** Duplikat-Scanner und Backup-Tool implementiert.
 
-3. **Medienbibliothek (Großes Feature):**
+3. **Medienbibliothek (In Arbeit):**
     - [x] Implementierung der `MediaLibrary` als Kern-Feature (MVP).
-    - [ ] Metadaten-Handling und Steam-ähnliche Ordnerverwaltung (erweiterte Features).
+    - [x] Metadaten-Handling und erweiterte UI-Features implementiert.
+    - [ ] **(Als Nächstes)** Integrationen und Automatisierungs-Features.
 
-4. **System-Werkzeuge & Konverter:**
+4. **System-Werkzeuge & Konverter (In Arbeit):**
     - [x] Implementierung des `SystemTools` Plugins mit Dateikonverter (MVP).
-    - [ ] Disk Integrity Monitor und erweiterte Features.
+    - [ ] **(Als Nächstes)** Disk Integrity Monitor und erweiterte Features.
 
-5. **Polishing & Release-Vorbereitung:**
+5. **(Neu) Advanced Integrations & Automation (Geplant):**
+    - [ ] Plugin-übergreifende Aktionen und Workflows.
+    - [ ] Scripting-Schnittstelle für Power-User.
+
+6. **Polishing & Release-Vorbereitung (Geplant):**
     - [ ] Umfassende Tests, Dokumentation und Fehlerbehebung.
     - [ ] Erstellen von Installationspaketen (z.B. mit PyInstaller).
 
@@ -40,148 +48,120 @@ Das MMST soll eine plattformübergreifende (Windows & Linux) Python-Anwendung we
 
 ## 3. Plugin: AudioTools
 
-*Dieses Plugin ist bereits in der Entwicklung. Der Plan spiegelt den von Ihnen bereitgestellten Fortschritt wider.*
-
-**Ziele:** Systemweiter Equalizer, Preset-Verwaltung, hochwertige Audioaufnahme mit Metadaten.
-
-**Status:** **MVP Abgeschlossen (Recording + EQ-DSP fertig)**
+**Status:** **MVP Abgeschlossen, Erweiterungen geplant**
 
 ### Arbeitsaufschlüsselung (AudioTools)
 
 - **Core Services & Utilities**
   - [x] `AudioDeviceService` zur Geräteerkennung hinzugefügt.
+  - [x] Loopback/Desktop-Audio-Erfassung über Windows-WASAPI integriert (inkl. Fallback-Handling).
   - [ ] **(Als Nächstes)** Windows-Backend via `pycaw` (WASAPI) implementieren.
   - [ ] **(Als Nächstes)** Linux-Backend via `pulsectl` (PulseAudio) implementieren.
   - [ ] Fallback für generische Systemgeräte bereitstellen.
-
-- **Config & UI**
-  - [x] Config-Schema für Presets und Qualitätseinstellungen definiert.
-  - [x] UI-Grundgerüst für Equalizer und Recorder erstellt.
-  - [x] Warnung bei fehlendem Audio-Backend implementiert.
+  - [ ] **(Neu)** Hot-Plug-Unterstützung: Auf Änderungen der Audiogeräte lauschen und die UI automatisch aktualisieren.
+  - [ ] **(Neu)** Voreinstellungen pro Gerät: Erlaube das Speichern von EQ-Presets pro Ausgabegerät.
 
 - **Equalizer Engine**
   - [x] Preset-Verwaltung (Speichern, Laden, Löschen) implementiert.
   - [x] Slider-Werte werden in Config gespeichert.
-  - [x] **DSP-Pipeline für Echtzeit-Equalizing integriert** (scipy.signal IIR-Filter, 10-Band parametrische EQ, Echtzeit-Callbacks via sounddevice).
+  - [x] DSP-Pipeline für Echtzeit-Equalizing integriert.
+  - [ ] **(Neu)** Echtzeit-Visualisierung: Einen Spektrum-Analysator neben den EQ-Bändern anzeigen, der das Audiosignal visualisiert.
+  - [ ] **(Neu)** Zusätzliche DSP-Effekte: Einen "Noise Gate" und "Kompressor" für Aufnahmequellen hinzufügen.
 
 - **Recording Pipeline**
   - [x] Aufnahme-Worker mit `sounddevice` und Fallback implementiert.
   - [x] Konfigurierbare Qualität (Sample Rate, Bit-Tiefe) wird unterstützt.
   - [x] Metadaten-Dialog (`mutagen`) nach der Aufnahme integriert.
   - [x] Aufnahmeverlauf mit Metadaten in der UI sichtbar.
+  - [x] Dateinamensschema & Verlaufspflege sorgen für eindeutige, aktuelle Einträge (inkl. Capture-Modus-Metadaten).
+  - [x] Desktop-Audio-Quelle in UI & Persistenz aufgenommen (Geräteeinstellungen pro Modus).
+  - [ ] **(Neu)** Aufnahme-Timer: Geplante Aufnahmen zu einer bestimmten Zeit starten/stoppen.
 
 ---
 
 ## 4. Plugin: FileManager
 
-**Ziele:** Finden und Löschen von doppelten Dateien, Erstellen von 1:1-Backups der Dateistruktur.
-
-**Status:** **In Arbeit (Duplikate & Backup mit Fortschritt)**
+**Status:** **MVP Abgeschlossen, Erweiterungen geplant**
 
 ### Arbeitsaufschlüsselung (FileManager)
 
 - **Feature: Duplikat-Scanner**
-  - [x] **UI:** Tabellenansicht zur Anzeige der Duplikate mit Checkboxen zum Löschen.
-  - [x] **Backend:** Scanner implementiert; läuft im ThreadPool des Plugins mit Fortschritts-Callback.
-    - [x] **Phase 1 (Größe):** Rekursives Scannen und Gruppieren von Dateien nach identischer Größe.
-    - [x] **Phase 2 (Hash):** Hash (SHA256) wird für Kandidaten identischer Größe berechnet.
-    - [x] **Threading:** Fortschrittsanzeige (aktuelle Datei, Zähler) an die UI angebunden.
-  - [x] **Anzeige:** Ergebnisse gruppiert; Checkboxen je Datei, Gruppen nicht löschbar.
-  - [x] **Aktion:** Löschfunktion inkl. Schutz „mindestens eine Datei pro Gruppe“ implementiert.
-  - [x] **Komfort:** „Im Ordner anzeigen“-Button für die ausgewählte Datei.
+  - [x] UI, Backend, Threading, Anzeige und Löschfunktion implementiert.
+  - [x] „Im Ordner anzeigen“-Button.
+  - [ ] **(Neu)** Alternative Scan-Methoden: Zusätzliche Optionen zum Finden von Duplikaten anbieten (z.B. nur Dateiname, Metadaten-Ähnlichkeit für Audiofiles).
+  - [ ] **(Neu)** Intelligente Auswahl: Buttons zum automatischen Auswählen von Duplikaten (z.B. "alle bis auf die Neueste auswählen", "alle in einem bestimmten Ordner auswählen").
 
 - **Feature: Backup-Tool**
-  - [x] **UI:** Felder für Quell- und Zielordner, Checkbox für "Spiegeln" vorhanden; Log-Panel integriert.
-  - [x] **Backend:** Läuft im ThreadPool des Plugins; nutzt `shutil` für Kopieroperationen.
-  - [x] **Fortschritt:** Fortschrittsbalken mit Gesamtanzahl (errechnet) und Zähler für Kopiert/Übersprungen; Log-Spiegelung in Echtzeit.
-  - [x] **Plattform:** `pathlib` konsequent; optional `send2trash` für Papierkorb-Löschung.
+  - [x] UI, Backend, Fortschrittsanzeige und `send2trash` implementiert.
+  - [ ] **(Neu)** Backup-Profile: Speichern und Laden von häufig genutzten Backup-Jobs (Quelle, Ziel, Einstellungen).
+  - [ ] **(Neu)** "Dry Run"-Modus: Simulation eines Backups, die anzeigt, welche Dateien kopiert, überschrieben oder gelöscht *würden*.
+  - [ ] **(Neu)** Zeitgesteuerte Backups: Integration eines Schedulers, um Backups täglich/wöchentlich auszuführen.
 
 ---
 
 ## 5. Plugin: MediaLibrary
 
-**Ziele:** Eine "Netflix-ähnliche" Ansicht für lokale Medien, Metadaten-Verwaltung, Integration externer Tools.
+**Status:** **Iteration 5 Abgeschlossen, Iteration 6 als Nächstes**
 
-**Status:** **In Arbeit (MVP abgeschlossen)**
+### Arbeitsaufschlüsselung (MediaLibrary)
 
-### Arbeitsaufschlüsselung (SystemTools)
+- **Core & UI**
+  - [x] SQLite-Backend, Ordner-Verwaltung, Echtzeit-`watchdog` implementiert.
+  - [x] Tabellen- und Kachel-Ansicht mit Cover-Cache und Hover-Effekten.
+  - [x] Master/Detail-Split-View mit dynamischen Tabs und Metadaten-Anzeige.
+  - [x] Filterleiste, Sortierung und Quick-Actions im Kontextmenü.
+  - [x] Metadaten-Engine mit Editor und Reader/Writer (`mutagen`/`pymediainfo`).
+  - [x] Persistente Sitzungen: Dashboard merkt sich Fenster & aktives Plugin, MediaLibrary speichert Filter, Tabs und Auswahl.
 
-- **Core Library Service**
-  - [x] Definieren einer Datenbank-Struktur (SQLite) zur Speicherung von Metadaten und Dateipfaden.
-  - [x] "Steam-ähnliche" Verwaltung von Bibliotheksordnern (mehrere Quellen auf verschiedenen Laufwerken).
-  - [x] **Echtzeit-Ordnerüberwachung** (`watchdog`-Bibliothek) zur automatischen Aktualisierung der Bibliothek.
-    - [x] FileSystemWatcher mit Observer für created/modified/deleted/moved Events.
-    - [x] Automatische SQLite-Updates beim Erkennen von Dateiänderungen.
-    - [x] UI-Toggle zum Aktivieren/Deaktivieren der Überwachung.
-    - [x] 15 Unit-Tests für Watcher-Funktionalität.
+- **Iteration 5 Ergebnisse**
+  - [x] Inline-Bearbeitung für Bewertung & Tags direkt aus der Detailansicht.
+  - [x] Speichern/Laden benutzerdefinierter Filter-Presets.
+  - [x] Stapelaktionen für Mehrfachauswahl (Metadaten-Dialog im Batch, etc.).
+  - [x] Externer Player-Button in Detail & Kontextmenü (pro Dateityp konfigurierbar).
+  - [x] Zusätzliche Tests & Persistenz-Coverage (UI-State, Attribute-Handling).
+  - [x] Thread-sicheres SQLite-Handling für Scanner und Watchdog eingeführt.
 
-- **UI / Frontend**
-  - [x] **MVP:** Tabellen-Ansicht mit Quellenverwaltung, Scannen mit Fortschritt, Liste indizierter Dateien.
-  - [x] **(Erweitert)** Kachel-basierte Ansicht mit Covern und Titeln.
-    - `QListWidget`-Galerie mit Cover-Thumbnails (192×192), Hover-Titeln und Doppelklick-Öffnung des Metadaten-Editors.
-    - Zentrales `CoverCache`-Backend mit Platzhalterfarben, Mutagen-Parsing und Observer-Signalen zur Synchronisierung zwischen Tabelle und Galerie.
-    - Live-Refresh der Galerie bei Watcher-Events sowie nach Cover-Änderungen im Editor.
-  - [x] **(Erweitert)** Detailansicht, die alle Metadaten anzeigt.
-    - Master/Detail-Split-View mit großem Cover-Preview (240²), dynamischen Tabs (Überblick, Metadaten, Technisch) und Kommentar-Viewer.
-    - Sofortige Aktualisierung nach Selektion in Tabelle/Galerie inkl. Cursor-Synchronisation und Platzhalter, falls keine Auswahl vorhanden.
-    - Metadaten werden cached (`MetadataReader` + Lazy-Load) und bei Watcher-/Editor-Events automatisch invalidiert.
-  - [x] **(Erweitert)** Mächtige Filter- und Sortierfunktionen (nach Genre, Bewertung, Datum etc.).
-    - Filterleiste mit Suchfeld, Typ-Dropdown, Sortierauswahl und Preset-Selector (Audio/Video/Favoriten, Zuletzt geändert).
-    - Textsuche greift auf gecachte Metadaten (Titel, Künstler, Album) zurück; Favoritenfilter nutzt Bewertungen ≥4 Sterne.
-    - Kombinierbare Sortierung (zuletzt hinzugefügt, MTime, Name, Größe) sowie sofortiges Re-Populieren von Tabelle/Galerie.
-  - [x] **(Erweitert)** Quick-Actions in der Galerie (z.B. „Abspielen“, „Im Explorer öffnen“).
-    - Kontextmenü für Tabelle & Galerie mit „Abspielen/Öffnen“ und „Im Ordner anzeigen“ inkl. Windows-Explorer-Select.
-    - Statusmeldungen bei Erfolg/Fehlschlag sowie Konsistenz mit Detailauswahl und Cache-Verhalten.
+- **Iteration 6 Fokus (Entwurf)**
+  - [ ] Smart Playlists & regelbasierte Vorschläge vorbereiten.
+  - [ ] Statistik-Dashboard für Bibliothekskennzahlen prototypen.
+  - [ ] Online-Scraper (TheMovieDB/MusicBrainz) evaluieren und anbinden.
 
-#### Nächster Schwerpunkt (Iteration 5)
-
-- Inline-Bearbeitung für Bewertung & Tags direkt aus der Detailansicht (Stern-Badges, Tag-Chips mit Persistenz).
-- Speichern/Laden benutzerdefinierter Filter-Presets (JSON im Config-Store, Sync mit UI).
-- Stapelaktionen für Mehrfachauswahl (Metadaten-Dialog im Batch, Cover-Neuladung, Watcher-Refresh).
-- Externer Player-Button in Detail & Kontextmenü (pro Dateityp konfigurierbar, nutzt neues Integrations-Modul).
-- Zusätzliche Tests: UI-Filter-Coverage, Kontextmenü-Stubs, Persistenz der Preset-Konfiguration.
-
-- **Metadaten-Engine** ✅ **Abgeschlossen**
-  - [x] **Editor:** Eine "Calibre-ähnliche" Bearbeitungsmaske für alle Metadatenfelder (4 Tabs: Common, Audio, Video, Technical).
-  - [x] **Reader/Writer:** Integration von `mutagen` (Audio) und `pymediainfo` (Video/MKV), um Metadaten direkt aus den Dateien zu lesen und zu schreiben.
-  - [x] **UI-Integration:** Doppelklick auf Datei öffnet Metadaten-Editor, Speichern schreibt Tags direkt in Dateien.
-  - [x] **Tests:** 12 Unit-Tests für MetadataReader, MetadataWriter und MediaMetadata-Dataclass.
-  - [ ] **Scraper (Optional):** Ein Online-Scraper, der versucht, Metadaten basierend auf dem Dateinamen zu finden (z.B. von TheMovieDB).
-
-- **Integrationen**
-  - [ ] **Externer Player:** Einstellungsdialog, in dem der Benutzer pro Dateityp eine externe Anwendung zum Öffnen festlegen kann (z.B. ".mkv -> VLC").
+- **Zukünftige Erweiterungen (Iteration 6 und darüber hinaus)**
+  - [ ] **(Neu)** **Smart Playlists:** Erstellen von dynamischen Wiedergabelisten basierend auf Filterkriterien (z.B. "Alle Rock-Songs > 4 Sterne aus den 90ern", "Zuletzt hinzugefügte Filme").
+  - [ ] **(Neu)** **Statistik-Dashboard:** Eine visuelle Übersicht der Bibliothek (Anzahl Dateien, Gesamtgröße, Verteilung nach Genre/Jahr, etc.).
+  - [ ] **Scraper:** Einen Online-Scraper implementieren, der Metadaten (inkl. Cover) von TheMovieDB, MusicBrainz etc. abruft.
   - [ ] **Calibre (Recherche):** Analyse der `metadata.db` von Calibre, um eine schreibgeschützte Ansicht der E-Book-Bibliothek zu ermöglichen.
 
 ---
 
 ## 6. Plugin: SystemTools
 
-**Ziele:** Eine Sammlung von Werkzeugen für Dateikonvertierung, Komprimierung und Systemdiagnose.
+**Status:** **MVP Abgeschlossen, Erweiterungen geplant**
 
-**Status:** **MVP Abgeschlossen (File Converter implementiert)**
+### Arbeitsaufschlüsselung (SystemTools)
 
-### Arbeitsaufschlüsselung
+- **Feature: Universal File Converter**
+  - [x] UI, Backend, Formatunterstützung und Threading implementiert.
+  - [x] Tool-Erkennung für ImageMagick/FFmpeg verbessert (inkl. Pfadauflösung & Nutzerhinweisen).
+  - [ ] **(Neu)** Stapelverarbeitung: Erlaube das Hinzufügen mehrerer Dateien und konvertiere sie nacheinander in einer Warteschlange.
+  - [ ] **(Neu)** Preset-System: Speichern von häufig genutzten Konvertierungseinstellungen (z.B. "MP4 zu GIF", "WAV zu MP3 192kbit").
 
-- **Feature: Universal File Converter** ✅ **MVP Abgeschlossen**
-  - [x] **UI:** Dateiauswahl, Zielformat-Dropdown, Konvertierungs-Log mit Fortschritt.
-  - [x] **Backend:** Wrapper um Kommandozeilen-Tools implementiert.
-    - [x] Prüft beim Start, ob `ffmpeg` und `ImageMagick` im System-PATH verfügbar sind.
-    - [x] Zeigt Tool-Status mit Version in der UI an.
-  - [x] **Formate:** Audio (MP3, WAV, FLAC, AAC, OGG), Video (MP4, MKV, AVI, WebM), Image (PNG, JPG, WebP, GIF, BMP).
-  - [x] **Conversion Engine:** `FileConverter` mit Timeout-Handling und Progress-Callbacks.
-  - [x] **Tests:** 21 Unit-Tests für Tool-Erkennung, Format-Inferenz und Konvertierungslogik.
-  - [x] **Threading:** Asynchrone Konvertierung via ThreadPoolExecutor ohne UI-Blockierung.
-
-- **Feature: JXL Image Tools**
-  - [ ] **Integration:** Recherche und Einbindung einer `libjxl`-Python-Bibliothek.
-  - [ ] **Funktionen:** Konvertierung von/zu JXL, Anzeige von JXL-Bildern (inkl. Animationen).
+- **Feature: Image Tools & Compression**
+  - [ ] **(Als Nächstes)** **JXL Image Tools:** Recherche und Einbindung einer `libjxl`-Python-Bibliothek für Konvertierung und Anzeige.
+  - [ ] **(Neu)** **Bild-Komprimierer:** Eine dedizierte UI erstellen, um Bilder zu komprimieren, mit visuellem Vorher/Nachher-Vergleich und Qualitäts-Schieberegler.
 
 - **Feature: Disk Integrity Monitor**
-  - [ ] **UI:** Zeigt eine Liste der Laufwerke mit ihrem S.M.A.R.T.-Status an.
-  - [ ] **Windows Backend:** Verwendet `wmic diskdrive get status` oder PowerShell `Get-PhysicalDisk`.
-  - [ ] **Linux Backend:** Verwendet `smartctl` aus `smartmontools`.
+  - [ ] **(Als Nächstes)** **UI:** Zeigt eine Liste der Laufwerke mit S.M.A.R.T.-Status, Temperatur und Modell an.
+  - [ ] **(Als Nächstes)** **Windows Backend:** Verwendet `wmic` oder PowerShell.
+  - [ ] **(Als Nächstes)** **Linux Backend:** Verwendet `smartctl`.
+  - [ ] **(Neu)** Benachrichtigungen: Sende eine Systembenachrichtigung, wenn sich der Status eines Laufwerks auf "Warning" oder "Error" ändert.
+
+- **(Neu) Feature: Temporäre Dateien-Reiniger**
+  - [ ] **UI:** Zeigt eine Liste von zu löschenden temporären Dateien gruppiert nach Kategorie (System-Cache, Browser-Cache, etc.) an.
+  - [ ] **Backend:** Implementiert Logik zum Finden von temporären Ordnern auf Windows (`%TEMP%`) und Linux (`/tmp`, `~/.cache`).
+  - [ ] **Aktion:** Erlaubt dem Benutzer, ausgewählte Kategorien sicher zu löschen.
 
 - **Feature: Fan Control (Experimentell & Hohes Risiko)**
-  - [ ] **Warnung:** Dieses Feature wird als "experimentell" markiert und erfordert explizite Aktivierung und Administratorrechte.
+  - [ ] **Warnung:** Dieses Feature wird als "experimentell" markiert.
+  - [ ] **Recherche:** Evaluierung von Bibliotheken. **Wird weiterhin zurückgestellt.**
   - [ ] **UI:** Graph-basierte Kurve (Temperatur vs. Lüfterdrehzahl).
-  - [ ] **Recherche:** Evaluierung von Bibliotheken wie `py-smc` (macOS), `lm-sensors` (Linux) und potenziellen Windows-Lösungen. **Wird zunächst zurückgestellt.**

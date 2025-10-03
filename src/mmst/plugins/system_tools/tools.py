@@ -50,6 +50,15 @@ class ToolDetector:
         command = command_parts[0]
         
         path = shutil.which(command)
+
+        # Additional lookup for ImageMagick on Windows installations that
+        # do not add "magick" to the PATH.
+        if not path and tool_name == "imagemagick" and platform.system() == "Windows":
+            path = self._find_imagemagick_windows()
+            if path:
+                command_parts = [path] + command_parts[1:]
+                command = path
+
         if not path:
             result = Tool(name=tool_name, command=command, available=False)
             self._cache[tool_name] = result
@@ -59,6 +68,26 @@ class ToolDetector:
         result = Tool(name=tool_name, command=command, available=True, version=version, path=path)
         self._cache[tool_name] = result
         return result
+
+    def _find_imagemagick_windows(self) -> Optional[str]:
+        candidates: List[Path] = []
+        program_files = os.environ.get("PROGRAMFILES")
+        program_files_x86 = os.environ.get("PROGRAMFILES(X86)")
+        local_programs = Path(os.environ.get("LOCALAPPDATA", "")) / "Programs"
+
+        for base in (program_files, program_files_x86):
+            if base:
+                candidates.append(Path(base))
+        candidates.append(local_programs)
+
+        for base in candidates:
+            if not base.exists():
+                continue
+            for folder in base.glob("ImageMagick*"):
+                magick_exe = folder / "magick.exe"
+                if magick_exe.exists():
+                    return str(magick_exe)
+        return None
 
     def _get_version(self, command_parts: List[str]) -> Optional[str]:
         try:

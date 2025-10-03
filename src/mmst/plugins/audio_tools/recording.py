@@ -5,6 +5,8 @@ import datetime as _dt
 import logging
 import os
 import queue as queue_module
+import platform
+import re
 import threading
 import time
 import wave
@@ -16,6 +18,11 @@ try:  # pragma: no cover - optional dependency
     import sounddevice as sd  # type: ignore[import-not-found]
 except Exception:  # pragma: no cover - missing runtime dependency
     sd = None  # type: ignore[assignment]
+
+try:  # pragma: no cover - optional dependency
+    import numpy as np  # type: ignore[import-not-found]
+except Exception:  # pragma: no cover - missing runtime dependency
+    np = None  # type: ignore[assignment]
 
 
 class RecordingError(RuntimeError):
@@ -29,6 +36,7 @@ class _RecordingSession:
     output_path: Path
     quality: Dict[str, int]
     mode: str = "placeholder"
+    capture_mode: str = "input"
     queue: Optional["queue_module.Queue[bytes]"] = None
     stop_event: Optional[threading.Event] = None
     stream: Optional[Any] = None
@@ -36,6 +44,7 @@ class _RecordingSession:
     sample_width: int = 2
     bit_depth: int = 16
     frames_captured: int = 0
+    uses_raw_stream: bool = True
 
 
 class RecordingController:
@@ -60,7 +69,14 @@ class RecordingController:
         with self._lock:
             return self._session is not None
 
-    def start(self, target_dir: Path, device_id: str, quality: Dict[str, int]) -> Path:
+    def start(
+        self,
+        target_dir: Path,
+        device_id: str,
+        quality: Dict[str, int],
+        *,
+        mode: str = "input",
+    ) -> Path:
         """Start a new recording session.
 
         Ensures only one session can run at a time, prepares the output directory and
@@ -71,13 +87,20 @@ class RecordingController:
                 raise RecordingError("Eine Aufnahme läuft bereits")
             target_dir.mkdir(parents=True, exist_ok=True)
             timestamp = _dt.datetime.now().strftime("%Y%m%d-%H%M%S")
-            filename = f"recording-{timestamp}.wav"
-            output_path = target_dir / filename
+            device_slug = re.sub(r"[^a-z0-9]+", "-", device_id.lower()).strip("-") or "device"
+            base_name = f"recording-{timestamp}-{device_slug}"
+            output_path = target_dir / f"{base_name}.wav"
+            counter = 1
+            while output_path.exists():
+                output_path = target_dir / f"{base_name}-{counter:02d}.wav"
+                counter += 1
+            capture_mode = mode if mode in {"input", "loopback"} else "input"
             session = _RecordingSession(
                 device_id=device_id,
                 start_time=time.time(),
                 output_path=output_path,
                 quality=dict(quality),
+                capture_mode=capture_mode,
             )
             if not self._force_placeholder:
                 try:
@@ -120,6 +143,7 @@ class RecordingController:
         info["device_id"] = session.device_id
         info["duration_seconds"] = duration_seconds
         info["path"] = session.output_path
+        info["capture_mode"] = session.capture_mode
         return info
 
     def abort(self) -> None:
@@ -192,30 +216,82 @@ class RecordingController:
         sample_rate = int(session.quality.get("sample_rate", 48000))
         channels = max(1, int(session.quality.get("channels", 2)))
         bit_depth, sample_width, dtype = self._resolve_sample_format(session.quality)
+        use_float_stream = session.capture_mode == "loopback" and np is not None
 
         session.sample_width = sample_width
         session.bit_depth = bit_depth
         session.queue = queue_module.Queue()
         session.stop_event = threading.Event()
         session.frames_captured = 0
+        session.uses_raw_stream = not use_float_stream
 
         def _callback(indata, frames, _time_info, status):  # pragma: no cover - interacts with hardware
             if status:
                 self._logger.warning("Audio Callback Status: %s", status)
             if not session.queue:
                 return
-            session.queue.put(bytes(indata))
+            if session.uses_raw_stream:
+                session.queue.put(bytes(indata))
+            else:
+                chunk = self._convert_float_buffer(indata, sample_width)
+                if chunk:
+                    session.queue.put(chunk)
 
         device_index = self._resolve_device_identifier(session.device_id)
+        device_argument: Any = device_index if device_index is not None else session.device_id
+
+        extra_settings = None
+        if session.capture_mode == "loopback":
+            if platform.system() != "Windows":
+                raise RuntimeError("Desktop-Audio-Aufnahme wird derzeit nur unter Windows unterstützt")
+            if not hasattr(sd, "WasapiSettings"):
+                raise RuntimeError("sounddevice unterstützt kein WASAPI Loopback in dieser Umgebung")
+            extra_settings = sd.WasapiSettings(loopback=True)  # type: ignore[attr-defined]
+            try:
+                info = sd.query_devices(device_argument)
+                max_output = None
+                if isinstance(info, dict):
+                    max_output = info.get("max_output_channels")
+                else:
+                    max_output = getattr(info, "max_output_channels", None)
+                if isinstance(max_output, (int, float)):
+                    max_output = int(max_output)
+                    if max_output > 0:
+                        channels = max(1, min(channels, max_output))
+                default_rate = None
+                if isinstance(info, dict):
+                    default_rate = info.get("default_samplerate")
+                else:
+                    default_rate = getattr(info, "default_samplerate", None)
+                if isinstance(default_rate, (int, float)) and default_rate > 0:
+                    sample_rate = int(default_rate)
+            except Exception as exc:  # pragma: no cover - defensive logging
+                self._logger.warning("Konnte Ausgabegerät für Loopback nicht lesen: %s", exc)
+
+        session.quality["channels"] = channels
+        session.quality["sample_rate"] = sample_rate
+
         session.output_path.parent.mkdir(parents=True, exist_ok=True)
-        stream = sd.RawInputStream(
-            device=device_index,
-            samplerate=sample_rate,
-            channels=channels,
-            dtype=dtype,
-            callback=_callback,
-            blocksize=0,
-        )
+        if session.uses_raw_stream:
+            stream = sd.RawInputStream(
+                device=device_argument,
+                samplerate=sample_rate,
+                channels=channels,
+                dtype=dtype,
+                callback=_callback,
+                blocksize=0,
+                extra_settings=extra_settings,
+            )
+        else:
+            stream = sd.InputStream(
+                device=device_argument,
+                samplerate=sample_rate,
+                channels=channels,
+                dtype="float32",
+                callback=_callback,
+                blocksize=0,
+                extra_settings=extra_settings,
+            )
         session.stream = stream
 
         def _writer_loop() -> None:  # pragma: no cover - interacts with hardware
@@ -254,6 +330,20 @@ class RecordingController:
             raise
 
         session.mode = "sounddevice"
+
+    def _convert_float_buffer(self, buffer: Any, sample_width: int) -> bytes:
+        """Convert a float32 numpy buffer into PCM bytes."""
+        if np is None:
+            return bytes(buffer)
+        array = np.asarray(buffer, dtype=np.float32)
+        if array.size == 0:
+            return b""
+        clipped = np.clip(array, -1.0, 1.0)
+        if sample_width <= 2:
+            pcm = (clipped * 32767.0).astype("<i2", copy=False)
+        else:
+            pcm = (clipped * 2147483647.0).astype("<i4", copy=False)
+        return pcm.tobytes()
 
     def _finalize_sounddevice_session(self, session: _RecordingSession) -> Dict[str, object]:
         sample_rate = int(session.quality.get("sample_rate", 48000))

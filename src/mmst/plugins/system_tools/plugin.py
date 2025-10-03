@@ -252,6 +252,7 @@ class SystemToolsPlugin(BasePlugin):
             source_format=source_format,
             target_format=target_format,
             tool=tool,
+            command_path=Path(tool_info.path) if tool_info.path else None,
         )
 
         def progress(message: str) -> None:

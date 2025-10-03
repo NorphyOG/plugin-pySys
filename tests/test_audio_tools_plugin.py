@@ -127,6 +127,39 @@ def test_audio_tools_recording_metadata(plugin, tmp_path):
     assert history[0]["metadata"]["artist"] == "Unit Test"
 
 
+def test_audio_tools_history_prunes_missing_files(plugin, tmp_path):
+    plugin.set_output_directory(tmp_path)
+    plugin.set_recorder_device("mic-1")
+
+    plugin.start_recording()
+    entry = plugin.stop_recording()
+
+    recorded_path = Path(entry["path"])
+    if recorded_path.exists():
+        recorded_path.unlink()
+
+    history = plugin.get_recording_history()
+    assert all(item["path"] != entry["path"] for item in history)
+
+    # Second call should remain stable after pruning
+    history_again = plugin.get_recording_history()
+    assert history_again == history
+
+
+def test_audio_tools_recorder_mode_selection(plugin):
+    assert plugin.get_recorder_mode() == "input"
+    plugin.set_recorder_device("mic-1")
+    assert plugin.get_recorder_device("input") == "mic-1"
+
+    plugin.set_recorder_mode("loopback")
+    plugin.set_recorder_device("out-1", mode="loopback")
+    assert plugin.get_recorder_device("loopback") == "out-1"
+
+    # Switching back should remember previous selections
+    plugin.set_recorder_mode("input")
+    assert plugin.get_recorder_device() == "mic-1"
+
+
 def test_audio_tools_quality_settings_affect_output(plugin, tmp_path):
     plugin.set_output_directory(tmp_path)
     plugin.set_recorder_device("mic-1")
