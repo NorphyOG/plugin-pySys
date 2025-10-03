@@ -14,6 +14,7 @@
 - Initial unit tests cover equalizer state transitions, preset lifecycle, and recorder configuration defaults.
 - Recorder workflow now includes a start/stop-ready backend: real captures via `sounddevice` when available, with a silent placeholder fallback for headless environments.
 - A `MMST_AUDIO_PLACEHOLDER=1` override keeps automated tests deterministic by forcing the silent writer.
+- Recorder stop flow launches a metadata dialog, stores tags per recording, and writes WAV ID3 data when `mutagen` is installed.
 
 ## Work Breakdown
 
@@ -49,7 +50,7 @@
 - [x] Implement placeholder recording worker that writes silent WAV files for MVP wiring.
 - [x] Build recording worker using `sounddevice` capturing PCM frames into a WAV file with graceful fallback handling.
 - [ ] Support highest available quality by default (e.g., 48 kHz / 24-bit) with ability to downsample.
-- [ ] On stop, open metadata dialog (`QDialog`) to capture Title/Artist/Album/Genre/Comments, commit via `mutagen`.
+- [x] On stop, open metadata dialog (`QDialog`) to capture Title/Artist/Album/Genre/Comments, commit via `mutagen`.
 - [ ] Save output to user-configured directory; allow open-in-folder action.
 
 ### 6. Platform Considerations

@@ -21,7 +21,7 @@ Der Core verwaltet Lebenszyklus, Benutzeroberfläche und gemeinsame Dienste, wä
 | Plugin | Beschreibung | Status |
 | ------ | ------------- | ------ |
 | `FileManagerPlugin` (`mmst.file_manager`) | Duplikat-Scanner mit Hash-Gruppierung, sicherer Löschfunktion und dateibasierten Backups | Prototyp |
-| `AudioToolsPlugin` (`mmst.audio_tools`) | Equalizer- und Recorder-Oberfläche mit per-Gerät-Presets, Qualitätsprofilen und konfigurierbarem Aufnahmeziel | Scaffold |
+| `AudioToolsPlugin` (`mmst.audio_tools`) | Equalizer- und Recorder-Oberfläche mit per-Gerät-Presets, WAV-Aufnahme (inkl. Metadaten-Dialog) und konfigurierbarem Aufnahmeziel | Recording MVP |
 
 Der Duplikat-Scanner nutzt parallele Threads, gruppiert Dateien anhand von SHA-256-Hashes und erlaubt das Löschen
 einzelner Kopien (standardmäßig via Papierkorb). Die Backup-Ansicht kopiert Ordnerbäume ohne Kompression, optional
@@ -66,7 +66,7 @@ als Spiegelung, und meldet Fortschritt sowie berechnete Statistiken im UI. Zentr
 
   > PySide6 ist erforderlich, um das Dashboard auszuführen. Die optionale `dev`-Gruppe installiert `pytest`. Für die
   > Löschfunktion des Duplikat-Scanners empfiehlt sich zusätzlich `send2trash` (wird automatisch mit der `dev`-Gruppe
-  > installiert).
+  > installiert). Für WAV-Metadaten nutzt das AudioTools-Plugin `mutagen`; die Bibliothek wird automatisch mitinstalliert.
 
 1. **Dashboard starten**
 
@@ -91,6 +91,7 @@ als Spiegelung, und meldet Fortschritt sowie berechnete Statistiken im UI. Zentr
 ## Ausblick
 
 - AudioTools-Plugin ausbauen: Equalizer-DSP, Recording-Pipeline und Plattform-spezifische Backends.
+  - Nächste Schritte: EQ-DSP Pipeline, Echtzeit-Pegelanzeige, Linux-spezifische Loopback-Backends.
 - MediaLibrary- und SystemTools-Plugins vorbereiten.
 - Plugin-Konfigurationsdialoge implementieren (z. B. Hash-Algorithmus im Duplikat-Scanner).
 - Ereignisbus erweitern (z. B. Toast-Benachrichtigungen im UI darstellen).

@@ -90,6 +90,33 @@ def test_audio_tools_recording_placeholder(plugin, tmp_path):
     assert history
     assert history[0]["filename"] == entry["filename"]
     assert history[0]["duration"].endswith("s")
+    assert set(history[0]["metadata"].keys()) == {"title", "artist", "album", "genre", "comment"}
+    assert all(value == "" for value in history[0]["metadata"].values())
+    assert history[0]["path"].endswith(entry["filename"])
+
+
+def test_audio_tools_recording_metadata(plugin, tmp_path):
+    plugin.set_output_directory(tmp_path)
+    plugin.set_recorder_device("mic-1")
+
+    plugin.start_recording()
+    entry = plugin.stop_recording()
+
+    metadata = {
+        "title": "Demo Track",
+        "artist": "Unit Test",
+        "album": "Suite",
+        "genre": "Test",
+        "comment": "Recorded during tests",
+    }
+    plugin.update_recording_metadata(entry["path"], metadata)
+
+    stored = plugin.get_recording_metadata(entry["path"])
+    assert stored["title"] == "Demo Track"
+    assert stored["comment"] == "Recorded during tests"
+
+    history = plugin.get_recording_history()
+    assert history[0]["metadata"]["artist"] == "Unit Test"
 
 
 def test_audio_tools_prevents_double_start(plugin, tmp_path):
