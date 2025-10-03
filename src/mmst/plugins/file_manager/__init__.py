@@ -1,0 +1,1 @@
+"""File Manager plugin package."""
