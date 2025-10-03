@@ -22,4 +22,4 @@ def test_convert_float_buffer_to_int32():
     assert len(pcm_bytes) == data.size * 4
     pcm_array = np.frombuffer(pcm_bytes, dtype="<i4")
     assert pcm_array.max() > pcm_array.min()
-    assert pcm_array.ptp() > 0
+    assert len(set(pcm_array.tolist())) > 1

@@ -246,7 +246,8 @@ class RecordingController:
                 raise RuntimeError("Desktop-Audio-Aufnahme wird derzeit nur unter Windows unterstützt")
             if not hasattr(sd, "WasapiSettings"):
                 raise RuntimeError("sounddevice unterstützt kein WASAPI Loopback in dieser Umgebung")
-            extra_settings = sd.WasapiSettings(loopback=True)  # type: ignore[attr-defined]
+            extra_settings = sd.WasapiSettings()  # type: ignore[attr-defined]
+            setattr(extra_settings, "loopback", True)
             try:
                 info = sd.query_devices(device_argument)
                 max_output = None
@@ -338,11 +339,13 @@ class RecordingController:
         array = np.asarray(buffer, dtype=np.float32)
         if array.size == 0:
             return b""
-        clipped = np.clip(array, -1.0, 1.0)
+        clipped = np.clip(array, -1.0, 1.0).astype(np.float64)
         if sample_width <= 2:
-            pcm = (clipped * 32767.0).astype("<i2", copy=False)
+            scaled = clipped * 32767.0
+            pcm = np.clip(scaled, -32768, 32767).astype("<i2")
         else:
-            pcm = (clipped * 2147483647.0).astype("<i4", copy=False)
+            scaled = clipped * 2147483647.0
+            pcm = np.clip(scaled, -2147483648, 2147483647).astype("<i4")
         return pcm.tobytes()
 
     def _finalize_sounddevice_session(self, session: _RecordingSession) -> Dict[str, object]:

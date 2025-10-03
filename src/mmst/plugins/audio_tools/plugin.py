@@ -2,14 +2,22 @@ from __future__ import annotations
 
 import os
 import platform
+import contextlib
+import threading
 from copy import deepcopy
 from datetime import datetime
 from functools import partial
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple, cast
 
-from PySide6.QtCore import Qt, QUrl  # type: ignore[import-not-found]
-from PySide6.QtGui import QDesktopServices  # type: ignore[import-not-found]
+from PySide6.QtCore import Qt, QTimer, QUrl  # type: ignore[import-not-found]
+from PySide6.QtGui import (  # type: ignore[import-not-found]
+    QColor,
+    QDesktopServices,
+    QPainter,
+    QPainterPath,
+    QPen,
+)
 from PySide6.QtWidgets import (  # type: ignore[import-not-found]
     QCheckBox,
     QComboBox,
@@ -56,6 +64,16 @@ except Exception:  # pragma: no cover - missing runtime dependency
     ID3 = None  # type: ignore[assignment]
     COMM = TALB = TCON = TIT2 = TPE1 = None  # type: ignore[assignment]
     ID3NoHeaderError = Exception  # type: ignore[assignment]
+
+try:  # pragma: no cover - optional dependency
+    import numpy as np  # type: ignore[import-not-found]
+except Exception:  # pragma: no cover - missing runtime dependency
+    np = None  # type: ignore[assignment]
+
+try:  # pragma: no cover - optional dependency
+    import sounddevice as sd  # type: ignore[import-not-found]
+except Exception:  # pragma: no cover - missing runtime dependency
+    sd = None  # type: ignore[assignment]
 
 _EQ_BANDS: Tuple[int, ...] = (31, 62, 125, 250, 500, 1000, 2000, 4000, 8000, 16000)
 _FLAT_VALUES: List[int] = [0 for _ in _EQ_BANDS]
@@ -481,12 +499,216 @@ class MetadataDialog(QDialog):
         }
 
 
+class AudioVisualizer(QWidget):
+    """Display a simple waveform preview using sounddevice input."""
+
+    def __init__(self, parent: Optional[QWidget] = None) -> None:
+        super().__init__(parent)
+        self.setMinimumHeight(140)
+        self.setAutoFillBackground(False)
+        self._lock = threading.Lock()
+        self._waveform: Optional[Any] = None
+        self._buffer_samples = 2048
+        self._stream: Optional[Any] = None
+        self._active = False
+        self._status_message: Optional[str] = None
+        self._status_is_error = False
+        self._timer = QTimer(self)
+        self._timer.timeout.connect(self.update)
+        self._timer.start(33)
+
+    def set_status(self, message: Optional[str], *, error: bool = False) -> None:
+        self._status_message = message
+        self._status_is_error = bool(error)
+        if not message:
+            self._status_is_error = False
+        if not self._active:
+            self.update()
+
+    def start(self, device_id: str, mode: str, quality: Dict[str, int]) -> bool:
+        self.stop()
+        if sd is None or np is None:
+            self.set_status("Visualizer benötigt sounddevice & numpy", error=False)
+            return False
+
+        try:
+            sounddevice = cast(Any, sd)
+            numpy = cast(Any, np)
+            sample_rate = max(8000, int(quality.get("sample_rate", 48000)))
+            channels = max(1, int(quality.get("channels", 2)))
+            device_argument: Any = device_id
+            try:
+                device_argument = int(device_id)
+            except (TypeError, ValueError):
+                pass
+
+            extra_settings = None
+            device_info = None
+            with contextlib.suppress(Exception):
+                device_info = sounddevice.query_devices(device_argument)
+
+            if mode == "loopback":
+                if platform.system() != "Windows" or not hasattr(sounddevice, "WasapiSettings"):
+                    raise RuntimeError("Desktop-Audio Vorschau nur unter Windows verfügbar")
+                extra_settings = sounddevice.WasapiSettings()  # type: ignore[attr-defined]
+                setattr(extra_settings, "loopback", True)
+                max_channels = self._extract_channel_count(device_info, "max_output_channels")
+            else:
+                max_channels = self._extract_channel_count(device_info, "max_input_channels")
+
+            if max_channels:
+                channels = max(1, min(channels, max_channels))
+
+            default_rate = self._extract_samplerate(device_info)
+            if default_rate:
+                sample_rate = int(default_rate)
+
+            self._buffer_samples = max(1024, min(16384, sample_rate // 10))
+            self._waveform = numpy.zeros(self._buffer_samples, dtype=numpy.float32)
+
+            def _callback(indata, frames, _time_info, status):  # pragma: no cover - hardware interaction
+                if status:
+                    self.set_status(f"Status: {status}", error=True)
+                chunk = numpy.asarray(indata, dtype=numpy.float32)
+                if chunk.ndim > 1:
+                    chunk = numpy.mean(chunk, axis=1)
+                flat = chunk.reshape(-1)
+                if flat.size == 0:
+                    return
+                with self._lock:
+                    target = self._waveform
+                    if target is None or target.size != self._buffer_samples:
+                        target = numpy.zeros(self._buffer_samples, dtype=numpy.float32)
+                    if flat.size >= target.size:
+                        target = flat[-target.size :]
+                    else:
+                        target = numpy.roll(target, -flat.size)
+                        target[-flat.size:] = flat
+                    self._waveform = target
+
+            stream = sounddevice.InputStream(
+                device=device_argument,
+                samplerate=sample_rate,
+                channels=channels,
+                dtype="float32",
+                callback=_callback,
+                blocksize=0,
+                extra_settings=extra_settings,
+            )
+            stream.start()
+            self._stream = stream
+            self._active = True
+            self.set_status(None)
+            return True
+        except Exception as exc:
+            self.set_status(str(exc), error=True)
+            self.stop()
+            return False
+
+    def stop(self) -> None:
+        self._active = False
+        if self._stream is not None:
+            with contextlib.suppress(Exception):
+                self._stream.stop()
+            with contextlib.suppress(Exception):
+                self._stream.close()
+            self._stream = None
+
+    def paintEvent(self, event) -> None:  # type: ignore[override]
+        painter = QPainter(self)
+        painter.fillRect(self.rect(), QColor("#101822"))
+
+        if self._status_message:
+            color = QColor("#ff8a65") if self._status_is_error else QColor("#eeeeee")
+            painter.setPen(color)
+            painter.drawText(self.rect(), Qt.AlignmentFlag.AlignCenter, self._status_message)
+            return
+
+        if np is None:
+            painter.setPen(QColor("#666"))
+            painter.drawText(self.rect(), Qt.AlignmentFlag.AlignCenter, "numpy nicht verfügbar")
+            return
+
+        numpy = cast(Any, np)
+        if not self._active or self._waveform is None:
+            painter.setPen(QColor("#666"))
+            painter.drawText(self.rect(), Qt.AlignmentFlag.AlignCenter, "Keine Vorschau verfügbar")
+            return
+
+        with self._lock:
+            data = numpy.copy(self._waveform) if self._waveform is not None else None
+        if data is None or data.size < 2:
+            return
+
+        width = max(1, self.width())
+        height = max(1, self.height())
+        mid = height / 2
+
+        max_value = float(numpy.max(numpy.abs(data))) if data.size else 0.0
+        if max_value <= 0.0001:
+            painter.setPen(QColor("#444"))
+            painter.drawText(self.rect(), Qt.AlignmentFlag.AlignCenter, "(Stille)")
+            return
+
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        painter.setPen(QPen(QColor("#4fc3f7"), 1.4))
+
+        step = max(1, data.size // width)
+        path = QPainterPath()
+        path.moveTo(0, mid)
+        scale = (height / 2) - 4
+        for x in range(width):
+            segment = data[x * step : (x + 1) * step]
+            if segment.size == 0:
+                continue
+            value = float(numpy.mean(segment) / max_value)
+            value = max(-1.0, min(1.0, value))
+            y = mid - value * scale
+            path.lineTo(float(x), y)
+        painter.drawPath(path)
+
+        axis_pen = QPen(QColor("#2e3d4f"))
+        axis_pen.setStyle(Qt.PenStyle.DashLine)
+        painter.setPen(axis_pen)
+        painter.drawLine(0, int(mid), width, int(mid))
+
+    @staticmethod
+    def _extract_channel_count(info: Any, key: str) -> Optional[int]:
+        if info is None:
+            return None
+        if isinstance(info, dict):
+            value = info.get(key)
+        else:
+            value = getattr(info, key, None)
+        if isinstance(value, (int, float)):
+            result = int(value)
+            return result if result > 0 else None
+        return None
+
+    @staticmethod
+    def _extract_samplerate(info: Any) -> Optional[int]:
+        if info is None:
+            return None
+        if isinstance(info, dict):
+            value = info.get("default_samplerate")
+        else:
+            value = getattr(info, "default_samplerate", None)
+        if isinstance(value, (int, float)) and value > 0:
+            return int(value)
+        return None
+
+    def closeEvent(self, event) -> None:  # type: ignore[override]
+        self.stop()
+        super().closeEvent(event)
+
+
 class RecorderPanel(QWidget):
     def __init__(self, plugin: "AudioToolsPlugin", parent: Optional[QWidget] = None) -> None:
         super().__init__(parent)
         self._plugin = plugin
         self._loading = False
         self._current_mode = "input"
+        self._visualizer_key: Optional[Tuple[str, str, int, int]] = None
 
         layout = QVBoxLayout(self)
         layout.setSpacing(8)
@@ -553,6 +775,10 @@ class RecorderPanel(QWidget):
 
         layout.addLayout(control_row)
 
+        self.visualizer = AudioVisualizer(self)
+        self.visualizer.set_status("Keine Vorschau verfügbar")
+        layout.addWidget(self.visualizer)
+
         self.recordings = QTreeWidget()
         self.recordings.setHeaderLabels(["Datei", "Dauer", "Größe", "Zeitpunkt", "Titel", "Künstler"])
         self.recordings.setRootIsDecorated(False)
@@ -615,6 +841,7 @@ class RecorderPanel(QWidget):
         device_id = self.device_combo.currentData()
         if isinstance(device_id, str):
             self._plugin.set_recorder_device(device_id, self._current_mode)
+        self._update_visualizer()
 
     def _on_source_mode_changed(self) -> None:
         if self._loading:
@@ -637,6 +864,7 @@ class RecorderPanel(QWidget):
         if dialog.exec() == QDialog.DialogCode.Accepted:
             self._plugin.update_quality_settings(dialog.result_quality())
             self._update_quality_summary()
+            self._update_visualizer()
 
     def _update_quality_summary(self) -> None:
         quality = self._plugin.get_quality_settings()
@@ -678,6 +906,7 @@ class RecorderPanel(QWidget):
             self.status_label.setText(f"Aufnahme läuft … ({name})")
         else:
             self._update_quality_summary()
+        self._update_visualizer()
 
     def _on_selection_changed(self) -> None:
         selected = self._selected_identifier()
@@ -718,6 +947,9 @@ class RecorderPanel(QWidget):
     def _start_recording(self) -> None:
         if self._plugin.is_recording():
             return
+        self.visualizer.set_status("Visualisierung während Aufnahme pausiert")
+        self.visualizer.stop()
+        self._visualizer_key = None
         try:
             self._plugin.start_recording()
         except RecordingError as exc:
@@ -744,6 +976,7 @@ class RecorderPanel(QWidget):
             f"Gespeichert: {entry['filename']} ({entry['duration']}, {entry['size']})"
         )
         self._refresh_recordings()
+        self._update_visualizer()
         identifier = entry.get("path", entry.get("filename"))
         if identifier:
             self._select_identifier(identifier)
@@ -758,6 +991,36 @@ class RecorderPanel(QWidget):
             if isinstance(value, str) and value == identifier:
                 self.recordings.setCurrentItem(item)
                 return
+
+    def _update_visualizer(self) -> None:
+        if not hasattr(self, "visualizer"):
+            return
+        if self._plugin.is_recording():
+            self.visualizer.set_status("Visualisierung während Aufnahme pausiert")
+            self.visualizer.stop()
+            self._visualizer_key = None
+            return
+        device_id = self.device_combo.currentData()
+        if not isinstance(device_id, str) or not device_id:
+            self.visualizer.stop()
+            self.visualizer.set_status("Kein Gerät ausgewählt")
+            self._visualizer_key = None
+            return
+        quality = self._plugin.get_quality_settings()
+        sample_rate = int(quality.get("sample_rate", 48000))
+        channels = int(quality.get("channels", 2))
+        key = (self._current_mode, device_id, sample_rate, channels)
+        if self._visualizer_key == key:
+            return
+        if not self.visualizer.start(device_id, self._current_mode, quality):
+            self._visualizer_key = None
+            return
+        self._visualizer_key = key
+
+    def closeEvent(self, event) -> None:  # type: ignore[override]
+        if hasattr(self, "visualizer"):
+            self.visualizer.stop()
+        super().closeEvent(event)
 
 
 class AudioToolsWidget(QWidget):
