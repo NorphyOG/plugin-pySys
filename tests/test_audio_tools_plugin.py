@@ -12,6 +12,11 @@ def services(tmp_path):
     return CoreServices(data_dir=tmp_path)
 
 
+@pytest.fixture(autouse=True)
+def force_placeholder_mode(monkeypatch):
+    monkeypatch.setenv("MMST_AUDIO_PLACEHOLDER", "1")
+
+
 @pytest.fixture
 def plugin(services):
     return AudioToolsPlugin(services)

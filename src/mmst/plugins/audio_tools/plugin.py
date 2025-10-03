@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 from copy import deepcopy
 from datetime import datetime
 from functools import partial
@@ -577,7 +578,12 @@ class AudioToolsPlugin(BasePlugin):
         self._active = False
         self._eq_state: Dict[str, Dict[str, Any]] = {}
         self._recorder_state: Dict[str, Any] = {}
-        self._recording = RecordingController()
+        placeholder_flag = os.getenv("MMST_AUDIO_PLACEHOLDER")
+        force_placeholder = placeholder_flag not in (None, "", "0", "false", "False")
+        self._recording = RecordingController(
+            logger=self.services.get_logger("AudioTools.Recording"),
+            force_placeholder=force_placeholder,
+        )
         self._current_recording_path: Optional[Path] = None
         self._load_state()
 
