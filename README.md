@@ -20,8 +20,10 @@ Der Core verwaltet Lebenszyklus, Benutzeroberfläche und gemeinsame Dienste, wä
 
 | Plugin | Beschreibung | Status |
 | ------ | ------------- | ------ |
-| `FileManagerPlugin` (`mmst.file_manager`) | Duplikat-Scanner mit Hash-Gruppierung, sicherer Löschfunktion und dateibasierten Backups | Prototyp |
-| `AudioToolsPlugin` (`mmst.audio_tools`) | Equalizer- und Recorder-Oberfläche mit per-Gerät-Presets, WAV-Aufnahme (inkl. Metadaten-Dialog) und konfigurierbarem Aufnahmeziel | Recording MVP |
+| `FileManagerPlugin` (`mmst.file_manager`) | Duplikat-Scanner mit Hash-Gruppierung, sicherer Löschfunktion und dateibasierten Backups mit Fortschrittsanzeige | ✅ MVP |
+| `AudioToolsPlugin` (`mmst.audio_tools`) | Echtzeit-10-Band-Equalizer mit scipy DSP, WAV-Recorder mit Metadaten, Preset-Verwaltung | ✅ MVP |
+| `MediaLibraryPlugin` (`mmst.media_library`) | SQLite-basierte Medienbibliothek mit Quellenverwaltung, asynchronem Scannen und Tabellenansicht | ✅ MVP |
+| `SystemToolsPlugin` (`mmst.system_tools`) | Dateikonverter für Audio/Video/Bild mit ffmpeg/ImageMagick-Integration und Tool-Erkennung | ✅ MVP |
 
 Der Duplikat-Scanner nutzt parallele Threads, gruppiert Dateien anhand von SHA-256-Hashes und erlaubt das Löschen
 einzelner Kopien (standardmäßig via Papierkorb). Die Backup-Ansicht kopiert Ordnerbäume ohne Kompression, optional
@@ -42,17 +44,26 @@ als Spiegelung, und meldet Fortschritt sowie berechnete Statistiken im UI. Zentr
 │       │   ├── plugin_manager.py
 │       │   └── services.py
 │       └── plugins/
-│           └── file_manager/
+│           ├── file_manager/
+│           │   ├── plugin.py
+│           │   ├── backup.py
+│           │   └── scanner.py
+│           ├── media_library/
+│           │   ├── plugin.py
+│           │   └── core.py
+│           └── system_tools/
 │               ├── plugin.py
-│               ├── backup.py
-│               └── scanner.py
+│               ├── tools.py
+│               └── converter.py
 └── tests/
     ├── test_audio_device_service.py
     ├── test_audio_tools_plugin.py
     ├── test_backup.py
     ├── test_config_store.py
     ├── test_duplicate_scanner.py
-    └── test_plugin_manager.py
+    ├── test_media_library.py
+    ├── test_plugin_manager.py
+    └── test_system_tools.py
 ```
 
 ## Schnellstart

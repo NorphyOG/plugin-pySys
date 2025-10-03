@@ -34,6 +34,7 @@ class _RecordingSession:
     stream: Optional[Any] = None
     writer_thread: Optional[threading.Thread] = None
     sample_width: int = 2
+    bit_depth: int = 16
     frames_captured: int = 0
 
 
@@ -132,11 +133,17 @@ class RecordingController:
             self._silent_abort(session)
 
     @staticmethod
+    def _resolve_sample_format(quality: Dict[str, int]) -> tuple[int, int, str]:
+        requested = int(quality.get("bit_depth", 24))
+        if requested <= 16:
+            return 16, 2, "int16"
+        return 32, 4, "int32"
+
+    @staticmethod
     def _write_silent_wav(path: Path, quality: Dict[str, int], duration_seconds: float) -> Dict[str, object]:
         sample_rate = int(quality.get("sample_rate", 48000))
         channels = max(1, int(quality.get("channels", 2)))
-        bit_depth = int(quality.get("bit_depth", 24))
-        sample_width = max(1, min(4, bit_depth // 8 or 1))
+        bit_depth, sample_width, _ = RecordingController._resolve_sample_format(quality)
 
         total_frames = max(1, int(duration_seconds * sample_rate))
         frames_written = 0
@@ -184,10 +191,10 @@ class RecordingController:
 
         sample_rate = int(session.quality.get("sample_rate", 48000))
         channels = max(1, int(session.quality.get("channels", 2)))
-        sample_width = 2  # 16-bit little endian for broad compatibility
-        dtype = "int16"
+        bit_depth, sample_width, dtype = self._resolve_sample_format(session.quality)
 
         session.sample_width = sample_width
+        session.bit_depth = bit_depth
         session.queue = queue_module.Queue()
         session.stop_event = threading.Event()
         session.frames_captured = 0
@@ -251,7 +258,7 @@ class RecordingController:
     def _finalize_sounddevice_session(self, session: _RecordingSession) -> Dict[str, object]:
         sample_rate = int(session.quality.get("sample_rate", 48000))
         channels = max(1, int(session.quality.get("channels", 2)))
-        bit_depth = 16
+        bit_depth = session.bit_depth if isinstance(session.bit_depth, int) else session.sample_width * 8
 
         self._stop_sounddevice_stream(session)
 

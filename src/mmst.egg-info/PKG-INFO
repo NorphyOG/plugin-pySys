@@ -8,6 +8,8 @@ Description-Content-Type: text/markdown
 Requires-Dist: PySide6>=6.7
 Requires-Dist: watchdog>=4.0
 Requires-Dist: typing-extensions>=4.12
+Requires-Dist: send2trash>=1.8
+Requires-Dist: mutagen>=1.47
 Provides-Extra: dev
 Requires-Dist: pytest>=8.2; extra == "dev"
 
@@ -33,10 +35,13 @@ Der Core verwaltet Lebenszyklus, Benutzeroberfläche und gemeinsame Dienste, wä
 
 | Plugin | Beschreibung | Status |
 | ------ | ------------- | ------ |
-| `FileManagerPlugin` (`mmst.file_manager`) | Duplikat-Scanner mit Hash-Vergleich und vorbereitetem Backup-Workspace | Prototyp |
+| `FileManagerPlugin` (`mmst.file_manager`) | Duplikat-Scanner mit Hash-Gruppierung, sicherer Löschfunktion und dateibasierten Backups | Prototyp |
+| `AudioToolsPlugin` (`mmst.audio_tools`) | Equalizer- und Recorder-Oberfläche mit per-Gerät-Presets, WAV-Aufnahme (inkl. Metadaten-Dialog) und konfigurierbarem Aufnahmeziel | Recording MVP |
 
-Der Duplikat-Scanner nutzt parallele Threads und gruppiert Dateien anhand von SHA-256-Hashes. Die Logik liegt in
-`mmst.plugins.file_manager.scanner` und ist bewusst UI-unabhängig aufgebaut.
+Der Duplikat-Scanner nutzt parallele Threads, gruppiert Dateien anhand von SHA-256-Hashes und erlaubt das Löschen
+einzelner Kopien (standardmäßig via Papierkorb). Die Backup-Ansicht kopiert Ordnerbäume ohne Kompression, optional
+als Spiegelung, und meldet Fortschritt sowie berechnete Statistiken im UI. Zentrale Logik befindet sich in
+`mmst.plugins.file_manager.scanner` und `mmst.plugins.file_manager.backup`.
 
 ## Projektstruktur
 
@@ -54,8 +59,13 @@ Der Duplikat-Scanner nutzt parallele Threads und gruppiert Dateien anhand von SH
 │       └── plugins/
 │           └── file_manager/
 │               ├── plugin.py
+│               ├── backup.py
 │               └── scanner.py
 └── tests/
+    ├── test_audio_device_service.py
+    ├── test_audio_tools_plugin.py
+    ├── test_backup.py
+    ├── test_config_store.py
     ├── test_duplicate_scanner.py
     └── test_plugin_manager.py
 ```
@@ -69,9 +79,11 @@ Der Duplikat-Scanner nutzt parallele Threads und gruppiert Dateien anhand von SH
    python -m pip install -e .[dev]
    ```
 
-   > PySide6 ist erforderlich, um das Dashboard auszuführen. Die optionale `dev`-Gruppe installiert `pytest`.
+  > PySide6 ist erforderlich, um das Dashboard auszuführen. Die optionale `dev`-Gruppe installiert `pytest`. Für die
+  > Löschfunktion des Duplikat-Scanners empfiehlt sich zusätzlich `send2trash` (wird automatisch mit der `dev`-Gruppe
+  > installiert). Für WAV-Metadaten nutzt das AudioTools-Plugin `mutagen`; die Bibliothek wird automatisch mitinstalliert.
 
-2. **Dashboard starten**
+1. **Dashboard starten**
 
    ```powershell
    python -m mmst.core.app
@@ -93,6 +105,8 @@ Der Duplikat-Scanner nutzt parallele Threads und gruppiert Dateien anhand von SH
 
 ## Ausblick
 
-- AudioTools-, MediaLibrary- und SystemTools-Plugins vorbereiten.
+- AudioTools-Plugin ausbauen: Equalizer-DSP, Recording-Pipeline und Plattform-spezifische Backends.
+  - Nächste Schritte: EQ-DSP Pipeline, Echtzeit-Pegelanzeige, Linux-spezifische Loopback-Backends.
+- MediaLibrary- und SystemTools-Plugins vorbereiten.
 - Plugin-Konfigurationsdialoge implementieren (z. B. Hash-Algorithmus im Duplikat-Scanner).
 - Ereignisbus erweitern (z. B. Toast-Benachrichtigungen im UI darstellen).

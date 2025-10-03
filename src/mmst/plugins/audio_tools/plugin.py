@@ -7,8 +7,10 @@ from functools import partial
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple, cast
 
-from PySide6.QtCore import Qt  # type: ignore[import-not-found]
+from PySide6.QtCore import Qt, QUrl  # type: ignore[import-not-found]
+from PySide6.QtGui import QDesktopServices  # type: ignore[import-not-found]
 from PySide6.QtWidgets import (  # type: ignore[import-not-found]
+    QCheckBox,
     QComboBox,
     QDialog,
     QDialogButtonBox,
@@ -96,6 +98,13 @@ class EqualizerPanel(QWidget):
         device_form.addRow("Gerät", self.device_combo)
         layout.addWidget(device_box)
 
+        self.device_notice = QLabel()
+        self.device_notice.setWordWrap(True)
+        self.device_notice.setObjectName("eq-device-notice")
+        self.device_notice.setStyleSheet("color: #f0c419;")
+        self.device_notice.setVisible(False)
+        layout.addWidget(self.device_notice)
+
         preset_box = QGroupBox("Presets")
         preset_layout = QHBoxLayout(preset_box)
         self.preset_combo = QComboBox()
@@ -118,6 +127,20 @@ class EqualizerPanel(QWidget):
         preset_layout.addWidget(self.reset_button)
 
         layout.addWidget(preset_box)
+
+        # EQ Engine Control
+        engine_box = QGroupBox("Echtzeit-Processing")
+        engine_layout = QHBoxLayout(engine_box)
+        self.enable_eq_checkbox = QCheckBox("Equalizer aktivieren")
+        self.enable_eq_checkbox.setToolTip("Aktiviert Echtzeit-Audio-Processing mit den EQ-Einstellungen")
+        self.enable_eq_checkbox.stateChanged.connect(self._on_eq_enable_changed)
+        engine_layout.addWidget(self.enable_eq_checkbox)
+        
+        self.eq_status_label = QLabel("● Inaktiv")
+        self.eq_status_label.setStyleSheet("color: #888;")
+        engine_layout.addWidget(self.eq_status_label)
+        engine_layout.addStretch(1)
+        layout.addWidget(engine_box)
 
         sliders_box = QGroupBox("10-Band Equalizer")
         sliders_layout = QHBoxLayout(sliders_box)
@@ -159,7 +182,7 @@ class EqualizerPanel(QWidget):
         try:
             self.device_combo.clear()
             for device in devices:
-                label = f"{device.name} ({device.host_api})"
+                label = self._plugin.describe_device(device)
                 self.device_combo.addItem(label, device.identifier)
             if selected:
                 index = self.device_combo.findData(selected)
@@ -220,6 +243,14 @@ class EqualizerPanel(QWidget):
                 self.preset_combo.setCurrentIndex(index)
         finally:
             self._loading = False
+
+        notice = self._plugin.get_device_backend_notice()
+        if notice:
+            self.device_notice.setText(notice)
+            self.device_notice.setVisible(True)
+        else:
+            self.device_notice.clear()
+            self.device_notice.setVisible(False)
 
         self._apply_values(values)
         self._update_button_states()
@@ -336,6 +367,26 @@ class EqualizerPanel(QWidget):
         self._apply_values(list(_FLAT_VALUES))
         self._push_values()
 
+    def _on_eq_enable_changed(self, state: int) -> None:
+        enabled = state == Qt.CheckState.Checked.value
+        device_id = self.current_device_id()
+        if not device_id:
+            return
+        
+        try:
+            if enabled:
+                values = self.current_values()
+                self._plugin.start_eq_engine(self._bus, device_id, values)
+                self.eq_status_label.setText("● Aktiv")
+                self.eq_status_label.setStyleSheet("color: #0f0;")
+            else:
+                self._plugin.stop_eq_engine(self._bus, device_id)
+                self.eq_status_label.setText("● Inaktiv")
+                self.eq_status_label.setStyleSheet("color: #888;")
+        except Exception as exc:
+            QMessageBox.warning(self, "EQ Engine Fehler", str(exc))
+            self.enable_eq_checkbox.setChecked(False)
+    
     def _on_slider_value_changed(self, index: int, value: int) -> None:
         self._value_labels[index].setText(f"{value} dB")
         self._push_values()
@@ -346,6 +397,11 @@ class EqualizerPanel(QWidget):
             return
         values = self.current_values()
         self._plugin.update_device_values(self._bus, device_id, values)
+        
+        # Also update EQ engine if it's running
+        if self.enable_eq_checkbox.isChecked():
+            self._plugin.update_eq_gains(self._bus, device_id, values)
+        
         self._update_status_label()
 
 
@@ -438,6 +494,13 @@ class RecorderPanel(QWidget):
         device_form.addRow("Gerät", self.device_combo)
         layout.addWidget(device_box)
 
+        self.device_notice = QLabel()
+        self.device_notice.setWordWrap(True)
+        self.device_notice.setObjectName("rec-device-notice")
+        self.device_notice.setStyleSheet("color: #f0c419;")
+        self.device_notice.setVisible(False)
+        layout.addWidget(self.device_notice)
+
         output_box = QGroupBox("Ausgabe")
         output_layout = QFormLayout(output_box)
         self.output_dir_edit = QLineEdit()
@@ -470,10 +533,15 @@ class RecorderPanel(QWidget):
         self.metadata_button.clicked.connect(self._edit_metadata)
         control_row.addWidget(self.metadata_button)
 
+        self.open_button = QPushButton("Ordner öffnen")
+        self.open_button.setEnabled(False)
+        self.open_button.clicked.connect(self._open_location)
+        control_row.addWidget(self.open_button)
+
         layout.addLayout(control_row)
 
         self.recordings = QTreeWidget()
-        self.recordings.setHeaderLabels(["Datei", "Dauer", "Größe", "Zeitpunkt"])
+        self.recordings.setHeaderLabels(["Datei", "Dauer", "Größe", "Zeitpunkt", "Titel", "Künstler"])
         self.recordings.setRootIsDecorated(False)
         self.recordings.itemSelectionChanged.connect(self._on_selection_changed)
         self.recordings.itemDoubleClicked.connect(lambda *_: self._edit_metadata())
@@ -489,7 +557,7 @@ class RecorderPanel(QWidget):
             selected = self._plugin.get_recorder_device()
             self.device_combo.clear()
             for device in devices:
-                label = f"{device.name} ({device.host_api})"
+                label = self._plugin.describe_device(device)
                 self.device_combo.addItem(label, device.identifier)
             if selected:
                 index = self.device_combo.findData(selected)
@@ -502,6 +570,13 @@ class RecorderPanel(QWidget):
                 if isinstance(device_id, str):
                     self._plugin.set_recorder_device(device_id)
             self.output_dir_edit.setText(self._plugin.get_output_directory())
+            notice = self._plugin.get_device_backend_notice()
+            if notice:
+                self.device_notice.setText(notice)
+                self.device_notice.setVisible(True)
+            else:
+                self.device_notice.clear()
+                self.device_notice.setVisible(False)
             self._update_quality_summary()
             self._refresh_recordings()
             self._update_controls()
@@ -538,12 +613,17 @@ class RecorderPanel(QWidget):
     def _refresh_recordings(self) -> None:
         self.recordings.clear()
         for info in self._plugin.get_recording_history():
+            metadata = info.get("metadata") if isinstance(info.get("metadata"), dict) else {}
+            title = metadata.get("title", "") if isinstance(metadata, dict) else ""
+            artist = metadata.get("artist", "") if isinstance(metadata, dict) else ""
             item = QTreeWidgetItem(
                 [
                     info.get("filename", ""),
                     info.get("duration", ""),
                     info.get("size", ""),
                     info.get("timestamp", ""),
+                    title,
+                    artist,
                 ]
             )
             identifier = info.get("path", info.get("filename", ""))
@@ -565,7 +645,9 @@ class RecorderPanel(QWidget):
 
     def _on_selection_changed(self) -> None:
         selected = self._selected_identifier()
-        self.metadata_button.setEnabled(selected is not None and not self._plugin.is_recording())
+        can_edit = selected is not None and not self._plugin.is_recording()
+        self.metadata_button.setEnabled(can_edit)
+        self.open_button.setEnabled(selected is not None)
 
     def _selected_identifier(self) -> Optional[str]:
         items = self.recordings.selectedItems()
@@ -585,6 +667,17 @@ class RecorderPanel(QWidget):
         result = dialog.result_metadata()
         self._plugin.update_recording_metadata(identifier, result)
         self._refresh_recordings()
+
+    def _open_location(self) -> None:
+        identifier = self._selected_identifier()
+        if not identifier:
+            return
+        if not self._plugin.open_recording_location(identifier):
+            QMessageBox.warning(
+                self,
+                "Ordner nicht gefunden",
+                "Der Speicherort für diese Aufnahme konnte nicht geöffnet werden.",
+            )
 
     def _start_recording(self) -> None:
         if self._plugin.is_recording():
@@ -686,6 +779,10 @@ class AudioToolsPlugin(BasePlugin):
             force_placeholder=force_placeholder,
         )
         self._current_recording_path: Optional[Path] = None
+        
+        # EQ engines for each bus/device
+        self._eq_streams: Dict[Tuple[str, str], object] = {}  # (bus, device_id) -> EqualizerStream
+        
         self._load_state()
 
     # ------------------------------------------------------------------
@@ -727,6 +824,15 @@ class AudioToolsPlugin(BasePlugin):
         if self.is_recording():
             self._recording.abort()
             self._current_recording_path = None
+        
+        # Stop all running EQ streams
+        for stream in list(self._eq_streams.values()):
+            try:
+                if hasattr(stream, 'stop'):
+                    stream.stop()  # type: ignore
+            except Exception as exc:
+                self._logger.warning(f"Error stopping EQ stream: {exc}")
+        self._eq_streams.clear()
 
     # ------------------------------------------------------------------
     # Public API used by widget
@@ -735,6 +841,37 @@ class AudioToolsPlugin(BasePlugin):
         if bus == "output":
             return self.services.audio_devices.list_playback_devices()
         return self.services.audio_devices.list_capture_devices()
+
+    def describe_device(self, device: AudioDevice) -> str:
+        label = device.name
+        host = self._format_host_api(device.host_api)
+        if host:
+            label = f"{label} ({host})"
+        return label
+
+    def get_device_backend_notice(self) -> Optional[str]:
+        backend_name = self.services.audio_devices.backend_name
+        if not backend_name.startswith("fallback"):
+            return None
+        reason = backend_name.split(":", 1)[1] if ":" in backend_name else backend_name
+        if reason in ("sounddevice-unavailable", "sounddevice-error"):
+            return (
+                "Hinweis: Audio-Geräte werden im Platzhalter-Modus angezeigt, "
+                "weil die Bibliothek 'sounddevice' fehlt oder nicht funktioniert. "
+                "Installiere sie mit 'pip install sounddevice' und starte MMST neu."
+            )
+        if reason:
+            pretty = reason.replace("-", " ")
+            return f"Audio-Geräte werden im Platzhalter-Modus angezeigt ({pretty})."
+        return "Audio-Geräte werden im Platzhalter-Modus angezeigt."
+
+    @staticmethod
+    def _format_host_api(host_api: str) -> str:
+        if host_api == "sounddevice-unavailable":
+            return "Platzhalter"
+        if host_api.startswith("fallback"):
+            return host_api.split(":", 1)[-1].replace("-", " ")
+        return host_api
 
     def get_selected_device(self, bus: str) -> Optional[str]:
         bus_state = self._eq_state.get(bus, {})
@@ -846,6 +983,74 @@ class AudioToolsPlugin(BasePlugin):
 
     def is_recording(self) -> bool:
         return self._recording.is_recording()
+
+    def start_eq_engine(self, bus: str, device_id: str, gains: List[int]) -> None:
+        """Start the real-time EQ engine for a specific device."""
+        from .equalizer import EqualizerStream
+        
+        key = (bus, device_id)
+        
+        # Stop existing stream if any
+        if key in self._eq_streams:
+            self.stop_eq_engine(bus, device_id)
+        
+        try:
+            # Parse device ID to get numeric device index
+            # Format: "input_0", "output_1", etc.
+            device_idx = None
+            if device_id.startswith(bus):
+                parts = device_id.split("_")
+                if len(parts) > 1:
+                    try:
+                        device_idx = int(parts[1])
+                    except ValueError:
+                        pass
+            
+            # Create and start the EQ stream
+            # For input bus, use input device; for output, use output device
+            if bus == "input":
+                stream = EqualizerStream(input_device=device_idx, output_device=device_idx)
+            else:  # output
+                stream = EqualizerStream(input_device=device_idx, output_device=device_idx)
+            
+            # Set gains
+            stream.engine.set_gains([float(g) for g in gains])
+            stream.engine.set_enabled(True)
+            
+            # Start stream
+            stream.start()
+            
+            self._eq_streams[key] = stream
+            self._logger.info(f"Started EQ engine for {bus}/{device_id}")
+        
+        except Exception as exc:
+            self._logger.error(f"Failed to start EQ engine: {exc}")
+            raise RuntimeError(f"EQ Engine konnte nicht gestartet werden: {exc}")
+    
+    def stop_eq_engine(self, bus: str, device_id: str) -> None:
+        """Stop the real-time EQ engine for a specific device."""
+        key = (bus, device_id)
+        stream = self._eq_streams.pop(key, None)
+        
+        if stream:
+            try:
+                if hasattr(stream, 'stop'):
+                    stream.stop()  # type: ignore
+                self._logger.info(f"Stopped EQ engine for {bus}/{device_id}")
+            except Exception as exc:
+                self._logger.warning(f"Error stopping EQ engine: {exc}")
+    
+    def update_eq_gains(self, bus: str, device_id: str, gains: List[int]) -> None:
+        """Update EQ gains for a running engine."""
+        key = (bus, device_id)
+        stream = self._eq_streams.get(key)
+        
+        if stream and hasattr(stream, 'engine'):
+            try:
+                stream.engine.set_gains([float(g) for g in gains])  # type: ignore
+                self._logger.debug(f"Updated EQ gains for {bus}/{device_id}")
+            except Exception as exc:
+                self._logger.warning(f"Error updating EQ gains: {exc}")
 
     def get_recording_metadata(self, identifier: str) -> Dict[str, str]:
         path = self._resolve_identifier_to_path(identifier)
@@ -1022,6 +1227,32 @@ class AudioToolsPlugin(BasePlugin):
                 },
             )
             del history_obj[50:]
+
+    def open_recording_location(self, identifier: str) -> bool:
+        path_str = self._resolve_identifier_to_path(identifier)
+        if not path_str:
+            return False
+        path = Path(path_str)
+        candidates = []
+        if path.exists():
+            if path.is_file():
+                candidates.append(path.parent)
+            candidates.append(path)
+        else:
+            candidates.extend([path.parent, Path(self.get_output_directory())])
+
+        for candidate in candidates:
+            if not isinstance(candidate, Path):
+                continue
+            try:
+                resolved = candidate.resolve()
+            except OSError:
+                continue
+            if not resolved.exists():
+                continue
+            if QDesktopServices.openUrl(QUrl.fromLocalFile(str(resolved))):
+                return True
+        return False
 
     @staticmethod
     def _sanitize_metadata(metadata: Dict[str, Any]) -> Dict[str, str]:

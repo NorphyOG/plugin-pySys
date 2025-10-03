@@ -98,6 +98,7 @@ Provide fast duplicate detection and simple, reliable folder backups across plat
   - Scan button with progress bar.
   - Results tree (`QTreeWidget`): top-level nodes represent duplicate groups, child rows list file paths, size, modified date, with checkboxes for deletion.
   - Action bar: `Delete Selected`, `Open Location`, `Export Report` (CSV/JSON).
+    - Action bar now exposes `Open Location` to launch the containing folder for a highlighted duplicate along with `Delete Selected` and future report actions.
 
 - **Backup Tab**:
   - Source folder picker and target folder picker.

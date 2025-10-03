@@ -1,3 +1,6 @@
+import wave
+from pathlib import Path
+
 import pytest  # type: ignore[import-not-found]
 
 PySide6 = pytest.importorskip("PySide6")
@@ -5,6 +8,7 @@ PySide6 = pytest.importorskip("PySide6")
 from mmst.core.services import CoreServices
 from mmst.plugins.audio_tools.plugin import AudioToolsPlugin
 from mmst.plugins.audio_tools.recording import RecordingError
+from mmst.core.audio import FallbackAudioBackend
 
 
 @pytest.fixture
@@ -85,6 +89,10 @@ def test_audio_tools_recording_placeholder(plugin, tmp_path):
     recorded_file = tmp_path / entry["filename"]
     assert recorded_file.exists()
     assert recorded_file.stat().st_size > 44  # WAV header + data
+    with wave.open(str(recorded_file), "rb") as wav_file:
+        assert wav_file.getsampwidth() in (2, 4)
+        assert wav_file.getframerate() == 48000
+        assert wav_file.getnchannels() == 2
 
     history = plugin.get_recording_history()
     assert history
@@ -119,6 +127,21 @@ def test_audio_tools_recording_metadata(plugin, tmp_path):
     assert history[0]["metadata"]["artist"] == "Unit Test"
 
 
+def test_audio_tools_quality_settings_affect_output(plugin, tmp_path):
+    plugin.set_output_directory(tmp_path)
+    plugin.set_recorder_device("mic-1")
+    plugin.update_quality_settings({"sample_rate": 44100, "bit_depth": 16, "channels": 1})
+
+    plugin.start_recording()
+    entry = plugin.stop_recording()
+
+    recorded_file = tmp_path / entry["filename"]
+    with wave.open(str(recorded_file), "rb") as wav_file:
+        assert wav_file.getframerate() == 44100
+        assert wav_file.getnchannels() == 1
+        assert wav_file.getsampwidth() == 2
+
+
 def test_audio_tools_prevents_double_start(plugin, tmp_path):
     plugin.set_output_directory(tmp_path)
     plugin.set_recorder_device("mic-1")
@@ -127,3 +150,47 @@ def test_audio_tools_prevents_double_start(plugin, tmp_path):
     with pytest.raises(RecordingError):
         plugin.start_recording()
     plugin.stop_recording()
+
+
+def test_audio_tools_open_recording_location_opens_directory(monkeypatch, plugin, tmp_path):
+    plugin.set_output_directory(tmp_path)
+    plugin.set_recorder_device("mic-1")
+
+    plugin.start_recording()
+    entry = plugin.stop_recording()
+
+    opened = {}
+
+    def fake_open(url):
+        opened["url"] = url
+        return True
+
+    monkeypatch.setattr("mmst.plugins.audio_tools.plugin.QDesktopServices.openUrl", fake_open)
+
+    assert plugin.open_recording_location(entry["path"])
+    assert Path(opened["url"].toLocalFile()) == tmp_path
+
+
+def test_audio_tools_open_recording_location_missing_returns_false(monkeypatch, plugin, tmp_path):
+    missing_root = tmp_path / "missing-root"
+    plugin.set_output_directory(missing_root)
+
+    monkeypatch.setattr(
+        "mmst.plugins.audio_tools.plugin.QDesktopServices.openUrl",
+        lambda url: True,
+    )
+
+    assert not plugin.open_recording_location("ghost.wav")
+
+
+def test_audio_tools_backend_notice_for_fallback(plugin):
+    plugin.services.audio_devices.set_backend(FallbackAudioBackend())
+
+    notice = plugin.get_device_backend_notice()
+    assert notice is not None
+    assert "sounddevice" in notice
+
+    devices = plugin.get_devices("input")
+    assert devices
+    label = plugin.describe_device(devices[0])
+    assert "Platzhalter" in label

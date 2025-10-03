@@ -15,6 +15,9 @@ dependencies = [
     "typing-extensions>=4.12",
     "send2trash>=1.8",
     "mutagen>=1.47",
+    "numpy>=1.26",
+    "scipy>=1.11",
+    "sounddevice>=0.4",
 ]
 
 [project.optional-dependencies]

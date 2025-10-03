@@ -4,7 +4,7 @@ import hashlib
 import os
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Dict, List
+from typing import Callable, Dict, List, Optional
 
 
 @dataclass
@@ -27,7 +27,11 @@ class DuplicateScanner:
         self.algorithm = algorithm
         self.chunk_size = chunk_size
 
-    def scan(self, root: Path) -> List[DuplicateGroup]:
+    def scan(
+        self,
+        root: Path,
+        progress: Optional[Callable[[Path, int, int], None]] = None,
+    ) -> List[DuplicateGroup]:
         if not root.exists() or not root.is_dir():
             raise ValueError("Der ausgewählte Ordner existiert nicht oder ist kein Verzeichnis")
 
@@ -44,12 +48,21 @@ class DuplicateScanner:
         potential_duplicates = [paths for paths in files_by_size.values() if len(paths) > 1]
         groups: Dict[str, List[DuplicateEntry]] = {}
 
+        total_candidates = sum(len(paths) for paths in potential_duplicates)
+        processed = 0
+
         for paths in potential_duplicates:
             for path in paths:
                 checksum = self._hash_file(path)
                 groups.setdefault(checksum, []).append(
                     DuplicateEntry(path=path, size=path.stat().st_size, checksum=checksum)
                 )
+                processed += 1
+                if progress:
+                    try:
+                        progress(path, processed, total_candidates)
+                    except Exception:
+                        continue
 
         duplicate_groups = [
             DuplicateGroup(checksum=checksum, entries=entries)

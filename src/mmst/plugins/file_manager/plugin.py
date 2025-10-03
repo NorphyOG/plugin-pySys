@@ -1,10 +1,12 @@
 from __future__ import annotations
 
 import concurrent.futures
+import os
 from pathlib import Path
 from typing import Callable, List, Optional
 
-from PySide6.QtCore import Qt, Signal  # type: ignore[import-not-found]
+from PySide6.QtCore import Qt, Signal, QUrl  # type: ignore[import-not-found]
+from PySide6.QtGui import QDesktopServices  # type: ignore[import-not-found]
 from PySide6.QtWidgets import (  # type: ignore[import-not-found]
     QCheckBox,
     QFileDialog,
@@ -14,6 +16,7 @@ from PySide6.QtWidgets import (  # type: ignore[import-not-found]
     QLabel,
     QLineEdit,
     QMessageBox,
+    QProgressBar,
     QPushButton,
     QTabWidget,
     QTextEdit,
@@ -36,8 +39,11 @@ except Exception:  # pragma: no cover - optional dependency
 class FileManagerWidget(QWidget):
     scan_completed = Signal(list)
     scan_failed = Signal(str)
+    scan_progress = Signal(str, int, int)
     backup_log_message = Signal(str)
     backup_completed = Signal(bool, str)
+    backup_progress_init = Signal(int)
+    backup_progress = Signal(int, int, str)
 
     def __init__(self, plugin: "FileManagerPlugin") -> None:
         super().__init__()
@@ -56,7 +62,10 @@ class FileManagerWidget(QWidget):
 
         self.scan_completed.connect(self._display_results)
         self.scan_failed.connect(self._handle_error)
+        self.scan_progress.connect(self._update_progress)
         self.backup_log_message.connect(self._append_backup_log)
+        self.backup_progress_init.connect(self._init_backup_progress)
+        self.backup_progress.connect(self._update_backup_progress)
         self.backup_completed.connect(self._handle_backup_finished)
 
     # ------------------------------------------------------------------
@@ -91,12 +100,18 @@ class FileManagerWidget(QWidget):
         self.results.setHeaderLabels(["Dateiname", "Pfad", "Größe", "Hash"])
         self.results.setRootIsDecorated(True)
         self.results.itemChanged.connect(self._on_result_item_changed)
+        self.results.itemSelectionChanged.connect(self._on_selection_changed)
         tab_layout.addWidget(self.results, stretch=1)
 
         button_row = QWidget()
         button_row_layout = QHBoxLayout(button_row)
         button_row_layout.setContentsMargins(0, 0, 0, 0)
         button_row_layout.addStretch(1)
+
+        self.open_button = QPushButton("Im Ordner anzeigen")
+        self.open_button.setEnabled(False)
+        self.open_button.clicked.connect(self._open_selected)
+        button_row_layout.addWidget(self.open_button)
 
         self.delete_button = QPushButton("Ausgewählte löschen")
         self.delete_button.setEnabled(False)
@@ -153,6 +168,19 @@ class FileManagerWidget(QWidget):
         self.backup_log.setReadOnly(True)
         tab_layout.addWidget(self.backup_log, stretch=1)
 
+        progress_row = QWidget()
+        progress_layout = QHBoxLayout(progress_row)
+        progress_layout.setContentsMargins(0, 0, 0, 0)
+        self.backup_progress_bar = QProgressBar()
+        self.backup_progress_bar.setMinimum(0)
+        self.backup_progress_bar.setMaximum(0)  # indeterminate until initialized
+        self.backup_progress_bar.setVisible(False)
+        progress_layout.addWidget(self.backup_progress_bar, stretch=1)
+        self.backup_progress_label = QLabel("")
+        self.backup_progress_label.setMinimumWidth(200)
+        progress_layout.addWidget(self.backup_progress_label)
+        tab_layout.addWidget(progress_row)
+
         self.tabs.addTab(tab, "Backup")
 
     def set_enabled(self, enabled: bool) -> None:
@@ -202,6 +230,9 @@ class FileManagerWidget(QWidget):
         self.backup_log.clear()
         self.backup_log.append(f"Backup gestartet: {source} → {target}")
         self.backup_button.setEnabled(False)
+        if hasattr(self, "backup_progress_bar"):
+            self.backup_progress_bar.setVisible(True)
+            self.backup_progress_bar.setRange(0, 0)  # indeterminate until total known
         self._plugin.run_backup(source, target, self.mirror_checkbox.isChecked())
 
     def _append_backup_log(self, message: str) -> None:
@@ -212,12 +243,43 @@ class FileManagerWidget(QWidget):
 
     def _handle_backup_finished(self, success: bool, summary: str) -> None:
         self.backup_button.setEnabled(True)
+        if hasattr(self, "backup_progress_bar"):
+            self.backup_progress_bar.setVisible(False)
         if success:
             self.backup_log.append(summary)
             QMessageBox.information(self, "Backup abgeschlossen", summary)
         else:
             self.backup_log.append(f"Fehler: {summary}")
             QMessageBox.critical(self, "Backup fehlgeschlagen", summary)
+
+    def _init_backup_progress(self, total: int) -> None:
+        if hasattr(self, "backup_progress_bar"):
+            self.backup_progress_bar.setRange(0, max(0, total))
+            self.backup_progress_bar.setValue(0)
+            self.backup_progress_bar.setVisible(True)
+        if hasattr(self, "backup_progress_label"):
+            self.backup_progress_label.setText("")
+
+    def _update_backup_progress(self, processed: int, total: int, message: str) -> None:
+        if hasattr(self, "backup_progress_bar"):
+            # Ensure range reflects latest total (defensive if totals are refined)
+            if self.backup_progress_bar.maximum() != max(0, total):
+                self.backup_progress_bar.setRange(0, max(0, total))
+            self.backup_progress_bar.setValue(min(processed, max(0, total)))
+        if hasattr(self, "backup_progress_label") and total > 0:
+            percent = int((processed / total) * 100) if total else 0
+            filename = ""
+            if message:
+                # extract trailing filename/path after colon if present
+                parts = message.split(":", 1)
+                filename = parts[1].strip() if len(parts) > 1 else message
+            self.backup_progress_label.setText(f"{percent}% – {filename}")
+        # Also mirror into log for transparency
+        if message:
+            self.backup_log.append(message)
+            scrollbar = self.backup_log.verticalScrollBar()
+            if scrollbar:
+                scrollbar.setValue(scrollbar.maximum())
 
     def _start_scan(self) -> None:
         path_text = self.directory_edit.text().strip()
@@ -231,6 +293,7 @@ class FileManagerWidget(QWidget):
         self.results.clear()
         self.results.blockSignals(False)
         self.delete_button.setEnabled(False)
+        self.open_button.setEnabled(False)
         self._plugin.run_duplicate_scan(root)
 
     def _display_results(self, groups: List[DuplicateGroup]) -> None:
@@ -284,6 +347,7 @@ class FileManagerWidget(QWidget):
         self.status_label.setText(
             f"{len(groups)} Duplikatgruppen mit insgesamt {total_files} Dateien gefunden."
         )
+        self._on_selection_changed()
         self._update_delete_button()
         self.scan_button.setEnabled(True)
 
@@ -393,6 +457,7 @@ class FileManagerWidget(QWidget):
             self.status_label.setText("Keine Duplikate mehr vorhanden.")
 
         self._update_delete_button()
+        self._on_selection_changed()
 
         if errors:
             QMessageBox.warning(
@@ -400,6 +465,40 @@ class FileManagerWidget(QWidget):
                 "Löschen teilweise fehlgeschlagen",
                 "\n".join(errors),
             )
+
+    def _on_selection_changed(self) -> None:
+        if not hasattr(self, "open_button"):
+            return
+        for item in self.results.selectedItems():
+            if item and item.parent() is not None:
+                self.open_button.setEnabled(True)
+                return
+        self.open_button.setEnabled(False)
+
+    def _open_selected(self) -> None:
+        for item in self.results.selectedItems():
+            if item is None or item.parent() is None:
+                continue
+            path_value = item.data(0, Qt.ItemDataRole.UserRole)
+            if not path_value:
+                continue
+            target = Path(path_value)
+            url = QUrl.fromLocalFile(str(target.parent))
+            if not QDesktopServices.openUrl(url):  # pragma: no cover - depends on OS handlers
+                QMessageBox.warning(
+                    self,
+                    "Öffnen fehlgeschlagen",
+                    f"Der Ordner {target.parent} konnte nicht geöffnet werden.",
+                )
+            return
+
+    def _update_progress(self, path_text: str, processed: int, total: int) -> None:
+        if total <= 0:
+            self.status_label.setText("Scan läuft...")
+            return
+        name = Path(path_text).name if path_text else ""
+        display_name = f" – {name}" if name else ""
+        self.status_label.setText(f"Scan läuft… ({processed}/{total}){display_name}")
 
     @staticmethod
     def _format_size(size: int) -> str:
@@ -465,7 +564,15 @@ class FileManagerPlugin(BasePlugin):
                 self._widget.scan_failed.emit("Plugin ist nicht aktiv.")
             return
 
-        future = self._executor.submit(self._scanner.scan, root)
+        logger = self.services.logger
+
+        def progress(path: Path, processed: int, total: int) -> None:
+            logger.debug("Duplicate scan progress %s (%s/%s)", path, processed, total)
+            current_widget = self._widget
+            if current_widget:
+                current_widget.scan_progress.emit(str(path), processed, total)
+
+        future = self._executor.submit(self._scanner.scan, root, progress)
 
         def _handle_future(completed: concurrent.futures.Future[List[DuplicateGroup]]) -> None:
             try:
@@ -491,11 +598,30 @@ class FileManagerPlugin(BasePlugin):
 
         logger = self.services.logger
 
+        # Pre-calc total files in source tree for progress bar
+        try:
+            total_files = sum(len(files) for _, _, files in os.walk(source))
+        except Exception:
+            total_files = 0
+
+        widget = self._widget
+        if widget and total_files > 0:
+            widget.backup_progress_init.emit(total_files)
+
+        # Track processed files (copies or skips count as processed)
+        processed = 0
+
         def progress(message: str) -> None:
+            nonlocal processed
             logger.info("Backup: %s", message)
-            widget = self._widget
-            if widget:
-                widget.backup_log_message.emit(message)
+            current_widget = self._widget
+            if current_widget:
+                current_widget.backup_log_message.emit(message)
+
+                normalized = message.lower()
+                if normalized.startswith("kopiert:") or normalized.startswith("übersprungen:"):
+                    processed += 1
+                    current_widget.backup_progress.emit(processed, max(0, total_files), message)
 
         future: concurrent.futures.Future[BackupResult] = self._executor.submit(
             self._execute_backup, source, target, mirror, progress

@@ -21,7 +21,7 @@ Das MMST soll eine plattformübergreifende (Windows & Linux) Python-Anwendung we
     - [x] Erste UI-Entwürfe für `AudioTools` und `FileManager` erstellt.
 
 2. **Funktionalität der Basis-Plugins:**
-    - [ ] **AudioTools:** MVP abschließen (Aufnahme & EQ-Engine).
+    - [x] **AudioTools:** MVP abgeschlossen (Aufnahme & EQ-Engine mit DSP).
     - [x] **FileManager:** Duplikat-Scanner und Backup-Tool implementiert.
 
 3. **Medienbibliothek (Großes Feature):**
@@ -29,7 +29,8 @@ Das MMST soll eine plattformübergreifende (Windows & Linux) Python-Anwendung we
     - [ ] Metadaten-Handling und Steam-ähnliche Ordnerverwaltung (erweiterte Features).
 
 4. **System-Werkzeuge & Konverter:**
-    - [ ] Implementierung des `SystemTools` Plugins mit Dateikonverter und Integritätsanzeige.
+    - [x] Implementierung des `SystemTools` Plugins mit Dateikonverter (MVP).
+    - [ ] Disk Integrity Monitor und erweiterte Features.
 
 5. **Polishing & Release-Vorbereitung:**
     - [ ] Umfassende Tests, Dokumentation und Fehlerbehebung.
@@ -43,7 +44,7 @@ Das MMST soll eine plattformübergreifende (Windows & Linux) Python-Anwendung we
 
 **Ziele:** Systemweiter Equalizer, Preset-Verwaltung, hochwertige Audioaufnahme mit Metadaten.
 
-**Status:** **In Arbeit**
+**Status:** **MVP Abgeschlossen (Recording + EQ-DSP fertig)**
 
 ### Arbeitsaufschlüsselung
 
@@ -61,7 +62,7 @@ Das MMST soll eine plattformübergreifende (Windows & Linux) Python-Anwendung we
 - **Equalizer Engine**
   - [x] Preset-Verwaltung (Speichern, Laden, Löschen) implementiert.
   - [x] Slider-Werte werden in Config gespeichert.
-  - [ ] **(Als Nächstes)** DSP-Pipeline für Echtzeit-Equalizing integrieren.
+  - [x] **DSP-Pipeline für Echtzeit-Equalizing integriert** (scipy.signal IIR-Filter, 10-Band parametrische EQ, Echtzeit-Callbacks via sounddevice).
 
 - **Recording Pipeline**
   - [x] Aufnahme-Worker mit `sounddevice` und Fallback implementiert.
@@ -131,16 +132,19 @@ Das MMST soll eine plattformübergreifende (Windows & Linux) Python-Anwendung we
 
 **Ziele:** Eine Sammlung von Werkzeugen für Dateikonvertierung, Komprimierung und Systemdiagnose.
 
-**Status:** **Geplant**
+**Status:** **MVP Abgeschlossen (File Converter implementiert)**
 
 ### Arbeitsaufschlüsselung
 
-- **Feature: Universal File Converter**
-  - [ ] **UI:** Drag-and-Drop-Bereich, Auswahl des Zielformats.
-  - [ ] **Backend:** Wrapper um Kommandozeilen-Tools.
-    - [ ] Prüft beim Start, ob `ffmpeg` und `ImageMagick` im System-PATH verfügbar sind.
-    - [ ] Bietet Anweisungen zur Installation, falls sie fehlen.
-  - [ ] **Formate:** PDF->TXT, MP4->MP3, JPG->PNG, etc.
+- **Feature: Universal File Converter** ✅ **MVP Abgeschlossen**
+  - [x] **UI:** Dateiauswahl, Zielformat-Dropdown, Konvertierungs-Log mit Fortschritt.
+  - [x] **Backend:** Wrapper um Kommandozeilen-Tools implementiert.
+    - [x] Prüft beim Start, ob `ffmpeg` und `ImageMagick` im System-PATH verfügbar sind.
+    - [x] Zeigt Tool-Status mit Version in der UI an.
+  - [x] **Formate:** Audio (MP3, WAV, FLAC, AAC, OGG), Video (MP4, MKV, AVI, WebM), Image (PNG, JPG, WebP, GIF, BMP).
+  - [x] **Conversion Engine:** `FileConverter` mit Timeout-Handling und Progress-Callbacks.
+  - [x] **Tests:** 21 Unit-Tests für Tool-Erkennung, Format-Inferenz und Konvertierungslogik.
+  - [x] **Threading:** Asynchrone Konvertierung via ThreadPoolExecutor ohne UI-Blockierung.
 
 - **Feature: JXL Image Tools**
   - [ ] **Integration:** Recherche und Einbindung einer `libjxl`-Python-Bibliothek.
