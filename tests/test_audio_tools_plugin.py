@@ -4,6 +4,7 @@ PySide6 = pytest.importorskip("PySide6")
 
 from mmst.core.services import CoreServices
 from mmst.plugins.audio_tools.plugin import AudioToolsPlugin
+from mmst.plugins.audio_tools.recording import RecordingError
 
 
 @pytest.fixture
@@ -63,3 +64,34 @@ def test_audio_tools_preset_workflow(plugin):
 
     with pytest.raises(ValueError):
         plugin.delete_preset("output", device_id, "Flat")
+
+
+def test_audio_tools_recording_placeholder(plugin, tmp_path):
+    plugin.set_output_directory(tmp_path)
+    plugin.set_recorder_device("mic-1")
+
+    path = plugin.start_recording()
+    assert plugin.is_recording()
+    assert path.exists() is False  # file materializes on stop
+
+    entry = plugin.stop_recording()
+    assert not plugin.is_recording()
+
+    recorded_file = tmp_path / entry["filename"]
+    assert recorded_file.exists()
+    assert recorded_file.stat().st_size > 44  # WAV header + data
+
+    history = plugin.get_recording_history()
+    assert history
+    assert history[0]["filename"] == entry["filename"]
+    assert history[0]["duration"].endswith("s")
+
+
+def test_audio_tools_prevents_double_start(plugin, tmp_path):
+    plugin.set_output_directory(tmp_path)
+    plugin.set_recorder_device("mic-1")
+
+    plugin.start_recording()
+    with pytest.raises(RecordingError):
+        plugin.start_recording()
+    plugin.stop_recording()

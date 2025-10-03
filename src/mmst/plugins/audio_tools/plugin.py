@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from copy import deepcopy
+from datetime import datetime
 from functools import partial
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple, cast
@@ -30,9 +31,31 @@ from PySide6.QtWidgets import (  # type: ignore[import-not-found]
 
 from ...core.audio import AudioDevice
 from ...core.plugin_base import BasePlugin, PluginManifest
+from .recording import RecordingController, RecordingError
 
 _EQ_BANDS: Tuple[int, ...] = (31, 62, 125, 250, 500, 1000, 2000, 4000, 8000, 16000)
 _FLAT_VALUES: List[int] = [0 for _ in _EQ_BANDS]
+
+
+def _format_duration(seconds: float) -> str:
+    seconds = max(0.0, seconds)
+    if seconds >= 60:
+        minutes = int(seconds // 60)
+        remaining = seconds - minutes * 60
+        return f"{minutes}m {remaining:0.1f}s"
+    return f"{seconds:0.1f}s"
+
+
+def _format_filesize(size_bytes: int) -> str:
+    size = float(max(0, size_bytes))
+    units = ["B", "KB", "MB", "GB", "TB"]
+    idx = 0
+    while size >= 1024 and idx < len(units) - 1:
+        size /= 1024
+        idx += 1
+    if idx == 0:
+        return f"{int(size)} {units[idx]}"
+    return f"{size:0.1f} {units[idx]}"
 class EqualizerPanel(QWidget):
     def __init__(self, plugin: "AudioToolsPlugin", bus: str, parent: Optional[QWidget] = None) -> None:
         super().__init__(parent)
@@ -375,6 +398,8 @@ class RecorderPanel(QWidget):
         self.record_button = QPushButton("Aufnahme starten")
         self.stop_button = QPushButton("Stop")
         self.stop_button.setEnabled(False)
+        self.record_button.clicked.connect(self._start_recording)
+        self.stop_button.clicked.connect(self._stop_recording)
         control_row.addWidget(self.record_button)
         control_row.addWidget(self.stop_button)
 
@@ -418,6 +443,7 @@ class RecorderPanel(QWidget):
             self.output_dir_edit.setText(self._plugin.get_output_directory())
             self._update_quality_summary()
             self._refresh_recordings()
+            self._update_controls()
         finally:
             self._loading = False
 
@@ -460,6 +486,48 @@ class RecorderPanel(QWidget):
                 ]
             )
             self.recordings.addTopLevelItem(item)
+
+    def _update_controls(self) -> None:
+        recording = self._plugin.is_recording()
+        self.record_button.setEnabled(not recording)
+        self.stop_button.setEnabled(recording)
+        self.metadata_button.setEnabled(False)
+        if recording:
+            path = self._plugin.active_recording_path()
+            name = path.name if path else "laufend"
+            self.status_label.setText(f"Aufnahme läuft … ({name})")
+        else:
+            self._update_quality_summary()
+
+    def _start_recording(self) -> None:
+        if self._plugin.is_recording():
+            return
+        try:
+            self._plugin.start_recording()
+        except RecordingError as exc:
+            QMessageBox.warning(self, "Aufnahme fehlgeschlagen", str(exc))
+            return
+        except Exception as exc:  # pragma: no cover - defensive UI feedback
+            QMessageBox.critical(self, "Unerwarteter Fehler", str(exc))
+            return
+        self._update_controls()
+
+    def _stop_recording(self) -> None:
+        if not self._plugin.is_recording():
+            return
+        try:
+            entry = self._plugin.stop_recording()
+        except RecordingError as exc:
+            QMessageBox.warning(self, "Stop fehlgeschlagen", str(exc))
+            return
+        except Exception as exc:  # pragma: no cover - defensive UI feedback
+            QMessageBox.critical(self, "Unerwarteter Fehler", str(exc))
+            return
+        self._refresh_recordings()
+        self._update_controls()
+        self.status_label.setText(
+            f"Gespeichert: {entry['filename']} ({entry['duration']}, {entry['size']})"
+        )
 
 
 class AudioToolsWidget(QWidget):
@@ -509,6 +577,8 @@ class AudioToolsPlugin(BasePlugin):
         self._active = False
         self._eq_state: Dict[str, Dict[str, Any]] = {}
         self._recorder_state: Dict[str, Any] = {}
+        self._recording = RecordingController()
+        self._current_recording_path: Optional[Path] = None
         self._load_state()
 
     # ------------------------------------------------------------------
@@ -540,11 +610,16 @@ class AudioToolsPlugin(BasePlugin):
 
     def stop(self) -> None:
         self._active = False
+        if self.is_recording():
+            self._recording.abort()
+            self._current_recording_path = None
         if self._widget:
             self._widget.set_enabled(False)
 
     def shutdown(self) -> None:
-        pass
+        if self.is_recording():
+            self._recording.abort()
+            self._current_recording_path = None
 
     # ------------------------------------------------------------------
     # Public API used by widget
@@ -654,6 +729,61 @@ class AudioToolsPlugin(BasePlugin):
         if isinstance(history, list):
             return [dict(item) for item in history if isinstance(item, dict)]
         return []
+
+    def is_recording(self) -> bool:
+        return self._recording.is_recording()
+
+    def start_recording(self) -> Path:
+        device_id = self.get_recorder_device()
+        if not device_id:
+            raise RecordingError("Es ist kein Aufnahmegerät ausgewählt")
+        output_dir = Path(self.get_output_directory())
+        quality = self.get_quality_settings()
+        path = self._recording.start(output_dir, device_id, quality)
+        self._current_recording_path = path
+        return path
+
+    def stop_recording(self) -> Dict[str, str]:
+        info = self._recording.stop()
+        path = cast(Path, info.get("path"))
+        if not isinstance(path, Path):
+            raise RecordingError("Aufnahme konnte nicht gespeichert werden")
+        size_value = info.get("size_bytes", 0)
+        if isinstance(size_value, (int, float)):
+            size_bytes = int(size_value)
+        elif isinstance(size_value, str):
+            try:
+                size_bytes = int(float(size_value))
+            except ValueError:
+                size_bytes = 0
+        else:
+            size_bytes = 0
+
+        duration_value = info.get("duration_seconds", 0.0)
+        if isinstance(duration_value, (int, float)):
+            duration_seconds = float(duration_value)
+        elif isinstance(duration_value, str):
+            try:
+                duration_seconds = float(duration_value)
+            except ValueError:
+                duration_seconds = 0.0
+        else:
+            duration_seconds = 0.0
+        entry = {
+            "filename": path.name,
+            "duration": _format_duration(duration_seconds),
+            "size": _format_filesize(size_bytes),
+            "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        }
+        history = self._recorder_state.setdefault("history", [])
+        history.insert(0, entry)
+        del history[50:]
+        self._persist_recorder_state()
+        self._current_recording_path = None
+        return entry
+
+    def active_recording_path(self) -> Optional[Path]:
+        return self._current_recording_path
 
     # ------------------------------------------------------------------
     # Internal helpers

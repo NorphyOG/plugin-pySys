@@ -12,6 +12,7 @@
 - Equalizer and recorder tabs are scaffolded with device selectors, preset management, and quality dialog placeholders.
 - Config schema now persists per-device presets and recorder settings with sensible defaults and migration helpers.
 - Initial unit tests cover equalizer state transitions, preset lifecycle, and recorder configuration defaults.
+- Recorder workflow now includes a start/stop-ready placeholder writer that produces silent WAV files, updates history, and feeds the recorder UI.
 
 ## Work Breakdown
 
@@ -44,6 +45,7 @@
 
 ### 5. Recording Pipeline
 
+- [x] Implement placeholder recording worker that writes silent WAV files for MVP wiring.
 - [ ] Build recording worker using `sounddevice`/`pyaudio` capturing PCM frames into temp file.
 - [ ] Support highest available quality by default (e.g., 48 kHz / 24-bit) with ability to downsample.
 - [ ] On stop, open metadata dialog (`QDialog`) to capture Title/Artist/Album/Genre/Comments, commit via `mutagen`.
