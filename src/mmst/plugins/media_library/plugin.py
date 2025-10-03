@@ -363,7 +363,7 @@ class MediaPreviewWidget(QWidget):
 
 class CinemaModeWindow(QWidget):
     closed = Signal()
-    current_media_changed = Signal(str)
+    current_media_changed = Signal(str, dict)
     status_message = Signal(str)
 
     def __init__(self, entries: List[Dict[str, Any]], start_index: int = 0, parent: Optional[QWidget] = None) -> None:
@@ -516,7 +516,7 @@ class CinemaModeWindow(QWidget):
 
         self._current_index = index
         self._update_navigation_buttons()
-        self.current_media_changed.emit(str(abs_path))
+        self.current_media_changed.emit(str(abs_path), dict(entry))
         if auto_play:
             self.player.play()
         return True
@@ -662,6 +662,8 @@ class MediaLibraryWidget(QWidget):
         self._detail_field_labels: dict[str, QLabel] = {}
         self._detail_comment: Optional[QTextEdit] = None
         self.media_preview: Optional[MediaPreviewWidget] = None
+        self.cinema_mode_button: Optional[QToolButton] = None
+        self._cinema_window: Optional[CinemaModeWindow] = None
         self._playlists_cache: List[Dict[str, Any]] = []
         self.playlists_list: Optional[QListWidget] = None
         self.playlist_items_table: Optional[QTableWidget] = None
@@ -1327,6 +1329,12 @@ class MediaLibraryWidget(QWidget):
         self.external_player_button.setEnabled(False)
         self._external_player_menu = QMenu(self.external_player_button)
         self.external_player_button.setMenu(self._external_player_menu)
+        self.cinema_mode_button = QToolButton()
+        self.cinema_mode_button.setText("Kino-Modus")
+        self.cinema_mode_button.setToolTip("Video im Vollbild wiedergeben")
+        self.cinema_mode_button.setEnabled(False)
+        self.cinema_mode_button.setVisible(HAS_VIDEO_WIDGET)
+        self.cinema_mode_button.clicked.connect(self._on_cinema_mode_requested)
         self.add_to_playlist_button = QToolButton()
         self.add_to_playlist_button.setText("Zur Playlist hinzufügen")
         self.add_to_playlist_button.setToolTip("Medien zur Playlist hinzufügen oder neue Playlist erstellen")
@@ -1341,6 +1349,7 @@ class MediaLibraryWidget(QWidget):
         controls_layout.setSpacing(6)
         controls_layout.addStretch(1)
         controls_layout.addWidget(self.external_player_button)
+        controls_layout.addWidget(self.cinema_mode_button)
         controls_layout.addWidget(self.add_to_playlist_button)
         controls_layout.addStretch(1)
         layout.addWidget(controls_row)
@@ -1441,6 +1450,8 @@ class MediaLibraryWidget(QWidget):
             self.media_preview.clear()
         if self.add_to_playlist_button is not None:
             self.add_to_playlist_button.setEnabled(False)
+        if self.cinema_mode_button is not None:
+            self.cinema_mode_button.setEnabled(False)
         self._selected_path = None
         self._current_metadata_path = None
         if self.external_player_button is not None:
@@ -1514,14 +1525,9 @@ class MediaLibraryWidget(QWidget):
         selected_value = str(self._current_metadata_path) if self._current_metadata_path else None
         self._update_view_state_value("selected_path", selected_value)
 
-    def _display_entry(self, path: Path) -> None:
-        entry = self._entry_lookup.get(str(path))
-        if not entry:
-            self._clear_detail_panel()
-            return
-
-        media, source_path = entry
+    def _present_entry(self, media: MediaFile, source_path: Path) -> None:
         abs_path = (source_path / Path(media.path)).resolve(strict=False)
+        self._entry_lookup[str(abs_path)] = (media, source_path)
         self._selected_path = abs_path
         self._current_metadata_path = abs_path
 
@@ -1592,8 +1598,115 @@ class MediaLibraryWidget(QWidget):
         if self.media_preview is not None:
             self.media_preview.set_media(abs_path, media.kind)
 
+        if self.cinema_mode_button is not None:
+            is_video = media.kind.lower() == "video"
+            self.cinema_mode_button.setEnabled(is_video and HAS_VIDEO_WIDGET)
+            self.cinema_mode_button.setVisible(HAS_VIDEO_WIDGET)
+
         self._refresh_external_player_controls(abs_path)
         self._update_add_to_playlist_button_state()
+
+    def _display_entry(self, path: Path) -> None:
+        entry = self._entry_lookup.get(str(path))
+        if not entry:
+            self._clear_detail_panel()
+            return
+
+        media, source_path = entry
+        self._present_entry(media, source_path)
+
+    def _video_sequence_from_entries(
+        self, entries: Iterable[tuple[MediaFile, Path]], current_path: Path
+    ) -> tuple[List[Dict[str, Any]], int]:
+        sequence: List[Dict[str, Any]] = []
+        current_index = -1
+        for media, source_path in entries:
+            if str(media.kind).lower() != "video":
+                continue
+            abs_path = (source_path / Path(media.path)).resolve(strict=False)
+            metadata = self._get_cached_metadata(abs_path)
+            title = metadata.title or Path(media.path).stem
+            entry = {
+                "path": abs_path,
+                "title": title,
+                "media": media,
+                "source_path": source_path,
+            }
+            sequence.append(entry)
+            if current_index == -1 and abs_path == current_path:
+                current_index = len(sequence) - 1
+        return sequence, current_index
+
+    def _build_cinema_sequence(self, current_path: Path) -> tuple[List[Dict[str, Any]], int]:
+        if self._current_playlist_id is not None:
+            playlist_entries = self._plugin.list_playlist_items(self._current_playlist_id)
+            playlist_sequence, playlist_index = self._video_sequence_from_entries(playlist_entries, current_path)
+            if playlist_index != -1:
+                return playlist_sequence, playlist_index
+        filtered_sequence, filtered_index = self._video_sequence_from_entries(self._entries, current_path)
+        if filtered_index != -1:
+            return filtered_sequence, filtered_index
+        return self._video_sequence_from_entries(self._all_entries, current_path)
+
+    def _on_cinema_mode_requested(self) -> None:
+        if not HAS_VIDEO_WIDGET:
+            QMessageBox.information(
+                self,
+                "Kino-Modus",
+                "QtMultimedia mit Video-Unterstützung ist nicht verfügbar. Bitte PySide6-QtMultimedia installieren.",
+            )
+            return
+        if self._selected_path is None:
+            QMessageBox.information(self, "Kino-Modus", "Keine Videodatei ausgewählt.")
+            return
+
+        sequence, start_index = self._build_cinema_sequence(self._selected_path)
+        if not sequence or start_index < 0:
+            QMessageBox.information(
+                self,
+                "Kino-Modus",
+                "In der aktuellen Auswahl wurden keine Videos für den Kino-Modus gefunden.",
+            )
+            return
+
+        if self._cinema_window is not None:
+            try:
+                self._cinema_window.close()
+            except Exception:
+                pass
+            self._cinema_window = None
+
+        try:
+            window = CinemaModeWindow(sequence, start_index, parent=self.window())
+        except Exception as exc:
+            QMessageBox.warning(self, "Kino-Modus", f"Kino-Modus konnte nicht gestartet werden: {exc}")
+            return
+
+        self._cinema_window = window
+        window.current_media_changed.connect(self._on_cinema_media_changed)
+        window.status_message.connect(self.status_message.emit)
+        window.closed.connect(self._on_cinema_closed)
+        self.status_message.emit("Kino-Modus gestartet.")
+        window.showFullScreen()
+        window.raise_()
+        window.activateWindow()
+
+    def _on_cinema_media_changed(self, path_str: str, entry: Dict[str, Any]) -> None:
+        if not path_str:
+            return
+        if path_str in self._entry_lookup:
+            self._set_current_path(path_str, source="cinema")
+            return
+
+        media_obj = entry.get("media")
+        source_path = entry.get("source_path")
+        if isinstance(media_obj, MediaFile) and isinstance(source_path, Path):
+            self._present_entry(media_obj, source_path)
+            self._update_view_state_value("selected_path", path_str)
+
+    def _on_cinema_closed(self) -> None:
+        self._cinema_window = None
+        self.status_message.emit("Kino-Modus beendet.")
 
     # --- playlist helpers ---------------------------------------------
 

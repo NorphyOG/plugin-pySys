@@ -31,6 +31,7 @@ Das MMST soll eine plattformübergreifende (Windows & Linux) Python-Anwendung we
     - [x] Implementierung der `MediaLibrary` als Kern-Feature (MVP).
     - [x] Metadaten-Handling und erweiterte UI-Features implementiert.
     - [x] Integrierte Vorschau (Audio/Video) und Playlist-Verwaltung ergänzt.
+    - [x] Kino-Modus mit Vollbild-Player und Autoplay hinzugefügt.
     - [ ] **(Als Nächstes)** Automatisierungs-Features und intelligente Integrationen.
 
 4. **System-Werkzeuge & Konverter (In Arbeit):**
@@ -126,6 +127,7 @@ Das MMST soll eine plattformübergreifende (Windows & Linux) Python-Anwendung we
 - **Iteration 6 Fortschritt**
   - [x] Integrierter Audio/Video-Player in der Detailansicht (QtMultimedia, optionaler Fallback).
   - [x] Playlist-Datenbank (Schema, CRUD) und Playlist-Tab mit Hinzufügen/Entfernen.
+  - [x] Kino-Modus (Fullscreen) mit dynamischem Video-Wechsel & Autoplay.
 
 - **Iteration 6 Fokus (Entwurf)**
   - [ ] Smart Playlists & regelbasierte Vorschläge vorbereiten.

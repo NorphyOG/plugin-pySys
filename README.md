@@ -77,7 +77,6 @@ als Spiegelung, und meldet Fortschritt sowie berechnete Statistiken im UI. Zentr
 1. **Abhängigkeiten installieren**
 
    ```powershell
-   cd c:\Users\jerom\Desktop\plugin-pySys
    python -m pip install -e .[dev]
    ```
 
