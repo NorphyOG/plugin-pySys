@@ -30,7 +30,8 @@ Das MMST soll eine plattformübergreifende (Windows & Linux) Python-Anwendung we
 3. **Medienbibliothek (In Arbeit):**
     - [x] Implementierung der `MediaLibrary` als Kern-Feature (MVP).
     - [x] Metadaten-Handling und erweiterte UI-Features implementiert.
-    - [ ] **(Als Nächstes)** Integrationen und Automatisierungs-Features.
+    - [x] Integrierte Vorschau (Audio/Video) und Playlist-Verwaltung ergänzt.
+    - [ ] **(Als Nächstes)** Automatisierungs-Features und intelligente Integrationen.
 
 4. **System-Werkzeuge & Konverter (In Arbeit):**
     - [x] Implementierung des `SystemTools` Plugins mit Dateikonverter (MVP).
@@ -101,7 +102,7 @@ Das MMST soll eine plattformübergreifende (Windows & Linux) Python-Anwendung we
 
 ## 5. Plugin: MediaLibrary
 
-**Status:** **Iteration 5 Abgeschlossen, Iteration 6 als Nächstes**
+**Status:** **Iteration 5 abgeschlossen – Iteration 6 in Arbeit**
 
 ### Arbeitsaufschlüsselung (MediaLibrary)
 
@@ -112,6 +113,7 @@ Das MMST soll eine plattformübergreifende (Windows & Linux) Python-Anwendung we
   - [x] Filterleiste, Sortierung und Quick-Actions im Kontextmenü.
   - [x] Metadaten-Engine mit Editor und Reader/Writer (`mutagen`/`pymediainfo`).
   - [x] Persistente Sitzungen: Dashboard merkt sich Fenster & aktives Plugin, MediaLibrary speichert Filter, Tabs und Auswahl.
+  - [x] Galerie rendert große Bibliotheken per Lazy-Loading & Icon-Virtualisierung ohne Speicher-Spikes.
 
 - **Iteration 5 Ergebnisse**
   - [x] Inline-Bearbeitung für Bewertung & Tags direkt aus der Detailansicht.
@@ -120,6 +122,10 @@ Das MMST soll eine plattformübergreifende (Windows & Linux) Python-Anwendung we
   - [x] Externer Player-Button in Detail & Kontextmenü (pro Dateityp konfigurierbar).
   - [x] Zusätzliche Tests & Persistenz-Coverage (UI-State, Attribute-Handling).
   - [x] Thread-sicheres SQLite-Handling für Scanner und Watchdog eingeführt.
+
+- **Iteration 6 Fortschritt**
+  - [x] Integrierter Audio/Video-Player in der Detailansicht (QtMultimedia, optionaler Fallback).
+  - [x] Playlist-Datenbank (Schema, CRUD) und Playlist-Tab mit Hinzufügen/Entfernen.
 
 - **Iteration 6 Fokus (Entwurf)**
   - [ ] Smart Playlists & regelbasierte Vorschläge vorbereiten.

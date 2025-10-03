@@ -58,6 +58,21 @@ class LibraryIndex:
                 UNIQUE(source_id, path),
                 FOREIGN KEY(source_id) REFERENCES sources(id) ON DELETE CASCADE
             );
+            CREATE TABLE IF NOT EXISTS playlists (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                name TEXT NOT NULL UNIQUE,
+                created REAL NOT NULL DEFAULT (strftime('%s','now')),
+                updated REAL NOT NULL DEFAULT (strftime('%s','now'))
+            );
+            CREATE TABLE IF NOT EXISTS playlist_items (
+                playlist_id INTEGER NOT NULL,
+                source_id INTEGER NOT NULL,
+                path TEXT NOT NULL,
+                position INTEGER NOT NULL,
+                PRIMARY KEY (playlist_id, source_id, path),
+                FOREIGN KEY(playlist_id) REFERENCES playlists(id) ON DELETE CASCADE,
+                FOREIGN KEY(source_id) REFERENCES sources(id) ON DELETE CASCADE
+            );
                 """
             )
             cur.execute("PRAGMA table_info(files)")
@@ -152,6 +167,151 @@ class LibraryIndex:
             source_path = Path(str(row[4]))
             results.append((media, source_path))
         return results
+
+    def list_playlists(self) -> List[Tuple[int, str, int]]:
+        with self._lock:
+            cur = self._conn.cursor()
+            cur.execute(
+                """
+            SELECT p.id, p.name, COUNT(pi.path) AS item_count
+            FROM playlists AS p
+            LEFT JOIN playlist_items AS pi ON pi.playlist_id = p.id
+            GROUP BY p.id, p.name
+            ORDER BY LOWER(p.name)
+                """
+            )
+            rows = cur.fetchall()
+        return [(int(row[0]), str(row[1]), int(row[2])) for row in rows]
+
+    def create_playlist(self, name: str) -> Optional[int]:
+        clean = name.strip()
+        if not clean:
+            return None
+        with self._lock:
+            cur = self._conn.cursor()
+            try:
+                cur.execute(
+                    "INSERT INTO playlists(name, created, updated) VALUES (?, strftime('%s','now'), strftime('%s','now'))",
+                    (clean,),
+                )
+                self._conn.commit()
+                row_id = cur.lastrowid
+                return int(row_id) if row_id is not None else None
+            except sqlite3.IntegrityError:
+                return None
+
+    def rename_playlist(self, playlist_id: int, new_name: str) -> bool:
+        clean = new_name.strip()
+        if not clean:
+            return False
+        with self._lock:
+            cur = self._conn.cursor()
+            try:
+                cur.execute(
+                    "UPDATE playlists SET name = ?, updated = strftime('%s','now') WHERE id = ?",
+                    (clean, int(playlist_id)),
+                )
+                self._conn.commit()
+                return cur.rowcount > 0
+            except sqlite3.IntegrityError:
+                return False
+
+    def delete_playlist(self, playlist_id: int) -> bool:
+        with self._lock:
+            cur = self._conn.cursor()
+            cur.execute("DELETE FROM playlists WHERE id = ?", (int(playlist_id),))
+            self._conn.commit()
+            return cur.rowcount > 0
+
+    def list_playlist_items(self, playlist_id: int) -> List[Tuple[MediaFile, Path]]:
+        with self._lock:
+            cur = self._conn.cursor()
+            cur.execute(
+                """
+            SELECT f.path, f.size, f.mtime, f.kind, s.path, f.rating, f.tags, pi.position
+            FROM playlist_items AS pi
+            JOIN sources AS s ON s.id = pi.source_id
+            JOIN files AS f ON f.source_id = pi.source_id AND f.path = pi.path
+            WHERE pi.playlist_id = ?
+            ORDER BY pi.position ASC, LOWER(f.path)
+                """,
+                (int(playlist_id),),
+            )
+            rows = cur.fetchall()
+        results: List[Tuple[MediaFile, Path]] = []
+        for row in rows:
+            tags_value: Tuple[str, ...] = tuple()
+            if row[6]:
+                try:
+                    parsed = json.loads(str(row[6]))
+                    if isinstance(parsed, list):
+                        tags_value = tuple(str(tag) for tag in parsed if str(tag).strip())
+                except json.JSONDecodeError:
+                    tags_value = tuple(filter(None, str(row[6]).split(",")))
+            rating_value = row[5]
+            media = MediaFile(
+                path=str(row[0]),
+                size=int(row[1]),
+                mtime=float(row[2]),
+                kind=str(row[3]),
+                rating=int(rating_value) if rating_value is not None else None,
+                tags=tags_value,
+            )
+            source_path = Path(str(row[4]))
+            results.append((media, source_path))
+        return results
+
+    def add_to_playlist(self, playlist_id: int, file_path: Path) -> bool:
+        resolved = self._resolve_source(file_path)
+        if resolved is None:
+            return False
+        source_id, rel_path = resolved
+        with self._lock:
+            cur = self._conn.cursor()
+            cur.execute("SELECT 1 FROM playlists WHERE id = ?", (int(playlist_id),))
+            if cur.fetchone() is None:
+                return False
+            cur.execute(
+                "SELECT COALESCE(MAX(position), 0) + 1 FROM playlist_items WHERE playlist_id = ?",
+                (int(playlist_id),),
+            )
+            row = cur.fetchone()
+            position = int(row[0]) if row and row[0] is not None else 1
+            cur.execute(
+                """
+            INSERT OR IGNORE INTO playlist_items(playlist_id, source_id, path, position)
+            VALUES (?, ?, ?, ?)
+                """,
+                (int(playlist_id), int(source_id), str(rel_path), position),
+            )
+            inserted = cur.rowcount > 0
+            if inserted:
+                cur.execute(
+                    "UPDATE playlists SET updated = strftime('%s','now') WHERE id = ?",
+                    (int(playlist_id),),
+                )
+            self._conn.commit()
+            return inserted
+
+    def remove_from_playlist(self, playlist_id: int, file_path: Path) -> bool:
+        resolved = self._resolve_source(file_path)
+        if resolved is None:
+            return False
+        source_id, rel_path = resolved
+        with self._lock:
+            cur = self._conn.cursor()
+            cur.execute(
+                "DELETE FROM playlist_items WHERE playlist_id = ? AND source_id = ? AND path = ?",
+                (int(playlist_id), int(source_id), str(rel_path)),
+            )
+            removed = cur.rowcount > 0
+            if removed:
+                cur.execute(
+                    "UPDATE playlists SET updated = strftime('%s','now') WHERE id = ?",
+                    (int(playlist_id),),
+                )
+            self._conn.commit()
+            return removed
     
     def add_file_by_path(self, file_path: Path) -> bool:
         """Add a single file to the index by absolute path.
