@@ -13,9 +13,18 @@ from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Set, Tuple, cast
 
 from PySide6.QtCore import Qt, Signal, QSize, QUrl, QPoint, QEvent, QTimer, QObject, QRect  # type: ignore[import-not-found]
-from PySide6.QtGui import QDesktopServices, QIcon, QPixmap, QCloseEvent, QKeyEvent  # type: ignore[import-not-found]
+from PySide6.QtGui import (
+    QDesktopServices,
+    QIcon,
+    QPixmap,
+    QCloseEvent,
+    QKeyEvent,
+    QColor,
+    QPainter,
+)  # type: ignore[import-not-found]
 from PySide6.QtWidgets import (  # type: ignore[import-not-found]
     QDialog,
+    QApplication,
     QCheckBox,
     QFileDialog,
     QFormLayout,
@@ -32,6 +41,7 @@ from PySide6.QtWidgets import (  # type: ignore[import-not-found]
     QProgressBar,
     QPushButton,
     QMenu,
+    QProgressDialog,
     QSlider,
     QSplitter,
     QTableWidget,
@@ -43,6 +53,7 @@ from PySide6.QtWidgets import (  # type: ignore[import-not-found]
     QToolButton,
     QVBoxLayout,
     QWidget,
+    QSizePolicy,
 )
 
 try:  # pragma: no cover - optional dependency
@@ -59,6 +70,30 @@ HAS_VIDEO_WIDGET = HAS_QT_MULTIMEDIA and bool(QVideoWidget)
 MediaPlayerCls = cast(Any, QMediaPlayer)
 AudioOutputCls = cast(Any, QAudioOutput)
 VideoWidgetCls = cast(Any, QVideoWidget)
+
+
+def _tinted_icon(source: QIcon, color: QColor) -> QIcon:
+    """Return a colorized copy of the given icon."""
+    if source.isNull():
+        return source
+    result = QIcon()
+    sizes = {16, 20, 24, 28, 32, 40, 48}
+    for size in sorted(sizes):
+        pixmap = source.pixmap(size, size)
+        if pixmap.isNull():
+            continue
+        tinted = QPixmap(pixmap.size())
+        tinted.fill(Qt.GlobalColor.transparent)
+        painter = QPainter(tinted)
+        painter.drawPixmap(0, 0, pixmap)
+        composition_mode = getattr(QPainter, "CompositionMode_SourceIn", None)
+        if composition_mode is not None:
+            painter.setCompositionMode(composition_mode)
+        painter.fillRect(tinted.rect(), color)
+        painter.end()
+        result.addPixmap(tinted, QIcon.Mode.Normal, QIcon.State.Off)
+        result.addPixmap(tinted, QIcon.Mode.Active, QIcon.State.Off)
+    return result if not result.isNull() else source
 
 
 class MediaPreviewWidget(QWidget):
@@ -104,9 +139,11 @@ class MediaPreviewWidget(QWidget):
 
         if HAS_VIDEO_WIDGET and VideoWidgetCls is not None:
             video_widget = VideoWidgetCls(self)
-            video_widget.setMinimumHeight(200)
+            video_widget.setMinimumHeight(220)
+            video_widget.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
+            video_widget.setStyleSheet("background-color: black;")
             video_widget.hide()
-            layout.addWidget(video_widget)
+            layout.addWidget(video_widget, stretch=1)
             self.player.setVideoOutput(video_widget)
             self.video_widget = video_widget
 
@@ -116,20 +153,25 @@ class MediaPreviewWidget(QWidget):
         layout.addWidget(self._info_label)
 
         controls = QWidget(self)
+        controls.setStyleSheet("background-color: rgba(0, 0, 0, 120); color: white;")
         controls_layout = QHBoxLayout(controls)
         controls_layout.setContentsMargins(0, 0, 0, 0)
         controls_layout.setSpacing(6)
 
+        self._icon_color = QColor("#f4f4f4")
+
         self.play_button = QToolButton(controls)
         self.play_button.setEnabled(False)
-        self.play_button.setIcon(self.style().standardIcon(QStyle.StandardPixmap.SP_MediaPlay))
+        self.play_button.setIcon(self._control_icon(QStyle.StandardPixmap.SP_MediaPlay))
+        self.play_button.setIconSize(QSize(28, 28))
         self.play_button.setToolTip("Abspielen")
         self.play_button.clicked.connect(self._toggle_playback)
         controls_layout.addWidget(self.play_button)
 
         self.stop_button = QToolButton(controls)
         self.stop_button.setEnabled(False)
-        self.stop_button.setIcon(self.style().standardIcon(QStyle.StandardPixmap.SP_MediaStop))
+        self.stop_button.setIcon(self._control_icon(QStyle.StandardPixmap.SP_MediaStop))
+        self.stop_button.setIconSize(QSize(24, 24))
         self.stop_button.setToolTip("Stopp")
         self.stop_button.clicked.connect(self.stop)
         controls_layout.addWidget(self.stop_button)
@@ -144,6 +186,7 @@ class MediaPreviewWidget(QWidget):
 
         self.time_label = QLabel("00:00 / 00:00", controls)
         self.time_label.setMinimumWidth(110)
+        self.time_label.setStyleSheet("color: white; font-family: 'Fira Mono', monospace;")
         controls_layout.addWidget(self.time_label)
 
         self.volume_slider = QSlider(Qt.Orientation.Horizontal, controls)
@@ -236,6 +279,10 @@ class MediaPreviewWidget(QWidget):
         self.player.stop()
         self._update_play_button()
 
+    def _control_icon(self, standard: QStyle.StandardPixmap) -> QIcon:
+        color = getattr(self, "_icon_color", QColor("#f4f4f4"))
+        return _tinted_icon(self.style().standardIcon(standard), color)
+
     def _toggle_playback(self) -> None:
         if (
             not self._available
@@ -323,10 +370,10 @@ class MediaPreviewWidget(QWidget):
         state = self.player.playbackState()
         playing_value = self._playing_state_value()
         if state == playing_value:
-            self.play_button.setIcon(self.style().standardIcon(QStyle.StandardPixmap.SP_MediaPause))
+            self.play_button.setIcon(self._control_icon(QStyle.StandardPixmap.SP_MediaPause))
             self.play_button.setToolTip("Pausieren")
         else:
-            self.play_button.setIcon(self.style().standardIcon(QStyle.StandardPixmap.SP_MediaPlay))
+            self.play_button.setIcon(self._control_icon(QStyle.StandardPixmap.SP_MediaPlay))
             self.play_button.setToolTip("Abspielen")
 
     def _update_time_label(self, position: Optional[int] = None) -> None:
@@ -426,24 +473,36 @@ class CinemaModeWindow(QWidget):
 
         controls_layout.addLayout(timeline_row)
 
+        accent_color = QColor("#f5f5f5")
+        icon_size = QSize(32, 32)
+
         buttons_row = QHBoxLayout()
         buttons_row.setContentsMargins(0, 0, 0, 0)
         buttons_row.setSpacing(12)
 
         self.prev_button = QToolButton(controls_container)
-        self.prev_button.setIcon(self.style().standardIcon(QStyle.StandardPixmap.SP_MediaSkipBackward))
+        self.prev_button.setIcon(
+            _tinted_icon(self.style().standardIcon(QStyle.StandardPixmap.SP_MediaSkipBackward), accent_color)
+        )
+        self.prev_button.setIconSize(icon_size)
         self.prev_button.setToolTip("Vorheriges Video")
         self.prev_button.clicked.connect(self._play_previous)
         buttons_row.addWidget(self.prev_button)
 
         self.play_button = QToolButton(controls_container)
-        self.play_button.setIcon(self.style().standardIcon(QStyle.StandardPixmap.SP_MediaPlay))
+        self.play_button.setIcon(
+            _tinted_icon(self.style().standardIcon(QStyle.StandardPixmap.SP_MediaPlay), accent_color)
+        )
+        self.play_button.setIconSize(icon_size)
         self.play_button.setToolTip("Abspielen/Pausieren")
         self.play_button.clicked.connect(self._toggle_playback)
         buttons_row.addWidget(self.play_button)
 
         self.next_button = QToolButton(controls_container)
-        self.next_button.setIcon(self.style().standardIcon(QStyle.StandardPixmap.SP_MediaSkipForward))
+        self.next_button.setIcon(
+            _tinted_icon(self.style().standardIcon(QStyle.StandardPixmap.SP_MediaSkipForward), accent_color)
+        )
+        self.next_button.setIconSize(icon_size)
         self.next_button.setToolTip("Nächstes Video")
         self.next_button.clicked.connect(self._play_next)
         buttons_row.addWidget(self.next_button)
@@ -455,6 +514,11 @@ class CinemaModeWindow(QWidget):
         self.autoplay_button.setCheckable(True)
         self.autoplay_button.setChecked(True)
         self.autoplay_button.toggled.connect(self._on_autoplay_toggled)
+        self.autoplay_button.setStyleSheet(
+            "QToolButton { color: #f5f5f5; padding: 4px 10px; border: 1px solid rgba(245,245,245,0.4);"
+            " border-radius: 4px; }"
+            "QToolButton:checked { background-color: rgba(245,245,245,0.18); }"
+        )
         buttons_row.addWidget(self.autoplay_button)
 
         buttons_row.addStretch(1)
@@ -466,7 +530,10 @@ class CinemaModeWindow(QWidget):
         buttons_row.addStretch(1)
 
         self.exit_button = QToolButton(controls_container)
-        self.exit_button.setIcon(self.style().standardIcon(QStyle.StandardPixmap.SP_TitleBarCloseButton))
+        self.exit_button.setIcon(
+            _tinted_icon(self.style().standardIcon(QStyle.StandardPixmap.SP_TitleBarCloseButton), accent_color)
+        )
+        self.exit_button.setIconSize(QSize(24, 24))
         self.exit_button.setToolTip("Kino-Modus schließen")
         self.exit_button.clicked.connect(self.close)
         buttons_row.addWidget(self.exit_button)
@@ -551,10 +618,14 @@ class CinemaModeWindow(QWidget):
     def _on_playback_state_changed(self, _state: int) -> None:
         playing_value = MediaPreviewWidget._playing_state_value()
         if self.player.playbackState() == playing_value:
-            self.play_button.setIcon(self.style().standardIcon(QStyle.StandardPixmap.SP_MediaPause))
+            self.play_button.setIcon(
+                _tinted_icon(self.style().standardIcon(QStyle.StandardPixmap.SP_MediaPause), QColor("#f5f5f5"))
+            )
             self.play_button.setToolTip("Pausieren")
         else:
-            self.play_button.setIcon(self.style().standardIcon(QStyle.StandardPixmap.SP_MediaPlay))
+            self.play_button.setIcon(
+                _tinted_icon(self.style().standardIcon(QStyle.StandardPixmap.SP_MediaPlay), QColor("#f5f5f5"))
+            )
             self.play_button.setToolTip("Abspielen")
 
     def _on_media_status_changed(self, status: int) -> None:
@@ -643,6 +714,13 @@ class PlaylistPlaybackWindow(QWidget):
         self.setWindowFlag(Qt.WindowType.Window)
         self.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose, True)
         self.setWindowTitle(f"Playlist abspielen – {playlist_name}")
+        self.setObjectName("playlistPlaybackWindow")
+        self.setStyleSheet(
+            "#playlistPlaybackWindow { background-color: #111; color: #f5f5f5; }"
+            "#playlistPlaybackWindow QLabel { color: #f5f5f5; }"
+            "#playlistPlaybackWindow QCheckBox { color: #f5f5f5; }"
+            "#playlistPlaybackWindow QToolButton { color: #f5f5f5; }"
+        )
 
         self._playlist_name = playlist_name
         self._entries = entries
@@ -666,7 +744,10 @@ class PlaylistPlaybackWindow(QWidget):
         self._auto_checkbox.toggled.connect(self._on_auto_toggled)
         header_row.addWidget(self._auto_checkbox)
         self._close_button = QToolButton(self)
-        self._close_button.setIcon(self.style().standardIcon(QStyle.StandardPixmap.SP_TitleBarCloseButton))
+        self._close_button.setIcon(
+            _tinted_icon(self.style().standardIcon(QStyle.StandardPixmap.SP_TitleBarCloseButton), QColor("#f5f5f5"))
+        )
+        self._close_button.setIconSize(QSize(22, 22))
         self._close_button.setToolTip("Fenster schließen")
         self._close_button.clicked.connect(self.close)
         header_row.addWidget(self._close_button)
@@ -677,19 +758,29 @@ class PlaylistPlaybackWindow(QWidget):
         info_row.setSpacing(6)
         self._now_playing_label = QLabel("Bereit")
         self._now_playing_label.setWordWrap(True)
+        self._now_playing_label.setStyleSheet("font-size: 15px; font-weight: 500;")
         info_row.addWidget(self._now_playing_label, stretch=1)
 
+        accent_color = QColor("#f5f5f5")
+        icon_size = QSize(28, 28)
         controls_container = QWidget(self)
+        controls_container.setStyleSheet("background-color: rgba(255, 255, 255, 0.06); border-radius: 6px;")
         controls_layout = QHBoxLayout(controls_container)
-        controls_layout.setContentsMargins(0, 0, 0, 0)
-        controls_layout.setSpacing(4)
+        controls_layout.setContentsMargins(6, 4, 6, 4)
+        controls_layout.setSpacing(6)
         self._prev_button = QToolButton(controls_container)
-        self._prev_button.setIcon(self.style().standardIcon(QStyle.StandardPixmap.SP_MediaSkipBackward))
+        self._prev_button.setIcon(
+            _tinted_icon(self.style().standardIcon(QStyle.StandardPixmap.SP_MediaSkipBackward), accent_color)
+        )
+        self._prev_button.setIconSize(icon_size)
         self._prev_button.setToolTip("Vorheriger Titel")
         self._prev_button.clicked.connect(self.play_previous)
         controls_layout.addWidget(self._prev_button)
         self._next_button = QToolButton(controls_container)
-        self._next_button.setIcon(self.style().standardIcon(QStyle.StandardPixmap.SP_MediaSkipForward))
+        self._next_button.setIcon(
+            _tinted_icon(self.style().standardIcon(QStyle.StandardPixmap.SP_MediaSkipForward), accent_color)
+        )
+        self._next_button.setIconSize(icon_size)
         self._next_button.setToolTip("Nächster Titel")
         self._next_button.clicked.connect(self.play_next)
         controls_layout.addWidget(self._next_button)
@@ -697,6 +788,7 @@ class PlaylistPlaybackWindow(QWidget):
         layout.addLayout(info_row)
 
         self._preview = MediaPreviewWidget(self)
+        self._preview.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
         layout.addWidget(self._preview, stretch=1)
 
         self._preview.status_message.connect(self.status_message.emit)
@@ -1078,13 +1170,20 @@ class MediaLibraryWidget(QWidget):
 
         self.table = QTableWidget()
         self.table.setColumnCount(4)
-        self.table.setHorizontalHeaderLabels(["Pfad", "Größe", "MTime", "Typ"])
+        self.table.setHorizontalHeaderLabels(["Datei", "Größe", "Geändert", "Typ"])
         self.table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
         self.table.setSelectionMode(QAbstractItemView.SelectionMode.ExtendedSelection)
         self.table.itemDoubleClicked.connect(self._on_table_double_click)
         self.table.itemSelectionChanged.connect(self._on_table_selection_changed)
         self.table.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         self.table.customContextMenuRequested.connect(self._on_table_context_menu)
+        self.table.setSortingEnabled(True)
+        header = self.table.horizontalHeader()
+        header.setStretchLastSection(False)
+        header.setSectionResizeMode(0, QHeaderView.ResizeMode.Stretch)
+        header.setSectionResizeMode(1, QHeaderView.ResizeMode.ResizeToContents)
+        header.setSectionResizeMode(2, QHeaderView.ResizeMode.ResizeToContents)
+        header.setSectionResizeMode(3, QHeaderView.ResizeMode.ResizeToContents)
 
         splitter = QSplitter(Qt.Orientation.Horizontal)
         splitter.addWidget(self.table)
@@ -1217,6 +1316,7 @@ class MediaLibraryWidget(QWidget):
         header.setSectionResizeMode(1, QHeaderView.ResizeMode.Stretch)
         header.setSectionResizeMode(2, QHeaderView.ResizeMode.ResizeToContents)
         header.setSectionResizeMode(3, QHeaderView.ResizeMode.ResizeToContents)
+        self.tag_items_table.setSortingEnabled(True)
         self.tag_items_table.itemDoubleClicked.connect(self._on_tag_item_double_clicked)
         self.tag_items_table.itemSelectionChanged.connect(self._on_tag_item_selection_changed)
         right_layout.addWidget(self.tag_items_table, stretch=1)
@@ -1300,15 +1400,22 @@ class MediaLibraryWidget(QWidget):
         self._playlist_remove_button.clicked.connect(self._remove_selected_playlist_items)
         action_row.addWidget(self._playlist_remove_button)
 
+        accent_icon_color = QColor("#f5f5f5")
         self._playlist_move_up_button = QToolButton(right_panel)
-        self._playlist_move_up_button.setIcon(self.style().standardIcon(QStyle.StandardPixmap.SP_ArrowUp))
+        self._playlist_move_up_button.setIcon(
+            _tinted_icon(self.style().standardIcon(QStyle.StandardPixmap.SP_ArrowUp), accent_icon_color)
+        )
+        self._playlist_move_up_button.setIconSize(QSize(20, 20))
         self._playlist_move_up_button.setToolTip("Auswahl nach oben verschieben")
         self._playlist_move_up_button.clicked.connect(self._move_playlist_items_up)
         self._playlist_move_up_button.setEnabled(False)
         action_row.addWidget(self._playlist_move_up_button)
 
         self._playlist_move_down_button = QToolButton(right_panel)
-        self._playlist_move_down_button.setIcon(self.style().standardIcon(QStyle.StandardPixmap.SP_ArrowDown))
+        self._playlist_move_down_button.setIcon(
+            _tinted_icon(self.style().standardIcon(QStyle.StandardPixmap.SP_ArrowDown), accent_icon_color)
+        )
+        self._playlist_move_down_button.setIconSize(QSize(20, 20))
         self._playlist_move_down_button.setToolTip("Auswahl nach unten verschieben")
         self._playlist_move_down_button.clicked.connect(self._move_playlist_items_down)
         self._playlist_move_down_button.setEnabled(False)
@@ -1329,6 +1436,7 @@ class MediaLibraryWidget(QWidget):
         header.setSectionResizeMode(1, QHeaderView.ResizeMode.ResizeToContents)
         header.setSectionResizeMode(2, QHeaderView.ResizeMode.ResizeToContents)
         header.setSectionResizeMode(3, QHeaderView.ResizeMode.ResizeToContents)
+        self.playlist_items_table.setSortingEnabled(True)
         self.playlist_items_table.itemSelectionChanged.connect(self._update_playlist_controls_state)
         self.playlist_items_table.itemDoubleClicked.connect(self._on_playlist_item_double_clicked)
         right_layout.addWidget(self.playlist_items_table, stretch=1)
@@ -1539,36 +1647,131 @@ class MediaLibraryWidget(QWidget):
         tags = dialog.selected_tags()
         if rating is None and tags is None:
             return
-        for path in paths:
-            if rating is not None:
-                self._plugin.set_rating(path, rating if rating > 0 else None)
-            if tags is not None:
-                self._plugin.set_tags(path, tags)
-        self.status_message.emit(f"{len(paths)} Dateien aktualisiert.")
+        rating_value = None if rating is None else (rating if rating > 0 else None)
+        tags_list = list(tags) if tags is not None else None
+        total = len(paths)
+        progress = QProgressDialog("Metadaten werden aktualisiert…", "Abbrechen", 0, total, self)
+        progress.setWindowTitle("Stapelaktionen")
+        progress.setWindowModality(Qt.WindowModality.WindowModal)
+        progress.setMinimumDuration(0)
+        progress.setValue(0)
+
+        updated = 0
+        rating_updates = 0
+        tag_updates = 0
+        cancelled = False
+        try:
+            for index, path in enumerate(paths, start=1):
+                if progress.wasCanceled():
+                    cancelled = True
+                    break
+                changed = False
+                if rating_value is not None:
+                    if self._plugin.set_rating(path, rating_value, emit_status=False, refresh=False):
+                        rating_updates += 1
+                        changed = True
+                if tags_list is not None:
+                    if self._plugin.set_tags(path, tags_list, emit_status=False, refresh=False):
+                        tag_updates += 1
+                        changed = True
+                if changed:
+                    updated += 1
+                progress.setValue(index)
+                QApplication.processEvents()
+            if not cancelled:
+                progress.setValue(total)
+        finally:
+            progress.close()
+
+        if updated:
+            self.library_changed.emit()
+
+        if cancelled:
+            self.status_message.emit(f"{updated} Dateien aktualisiert (abgebrochen).")
+            return
+        if updated:
+            parts: List[str] = []
+            if rating_value is not None:
+                parts.append(f"Bewertung → {rating_value or 0}")
+            if tags_list is not None:
+                parts.append("Tags")
+            detail = f" ({', '.join(parts)})" if parts else ""
+            self.status_message.emit(f"{updated} Dateien aktualisiert{detail}.")
+        else:
+            self.status_message.emit("Keine Dateien aktualisiert.")
 
     def _on_batch_cover_reload(self) -> None:
         paths = self._selected_paths()
         if not paths:
             self.status_message.emit("Keine Auswahl für Cover-Aktualisierung.")
             return
-        for path in paths:
-            self._plugin.invalidate_cover(path)
-            self.evict_metadata_cache(path)
-        self.status_message.emit(f"Cover neu geladen für {len(paths)} Dateien.")
-        self.library_changed.emit()
+        progress = QProgressDialog("Cover werden neu geladen…", "Abbrechen", 0, len(paths), self)
+        progress.setWindowTitle("Stapelaktionen")
+        progress.setWindowModality(Qt.WindowModality.WindowModal)
+        progress.setMinimumDuration(0)
+        progress.setValue(0)
+
+        processed = 0
+        cancelled = False
+        try:
+            for index, path in enumerate(paths, start=1):
+                if progress.wasCanceled():
+                    cancelled = True
+                    break
+                self._plugin.invalidate_cover(path)
+                self.evict_metadata_cache(path)
+                processed += 1
+                progress.setValue(index)
+                QApplication.processEvents()
+            if not cancelled:
+                progress.setValue(len(paths))
+        finally:
+            progress.close()
+
+        if processed:
+            self.library_changed.emit()
+
+        if cancelled:
+            self.status_message.emit(f"Cover für {processed} Dateien neu geladen (abgebrochen).")
+        elif processed:
+            self.status_message.emit(f"Cover neu geladen für {processed} Dateien.")
+        else:
+            self.status_message.emit("Keine Cover aktualisiert.")
 
     def _on_batch_refresh_metadata(self) -> None:
         paths = self._selected_paths()
         if not paths:
             self.status_message.emit("Keine Auswahl für Neuindizierung.")
             return
+        progress = QProgressDialog("Metadaten werden neu eingelesen…", "Abbrechen", 0, len(paths), self)
+        progress.setWindowTitle("Stapelaktionen")
+        progress.setWindowModality(Qt.WindowModality.WindowModal)
+        progress.setMinimumDuration(0)
+        progress.setValue(0)
+
         updated = 0
-        for path in paths:
-            if self._plugin.refresh_metadata(path):
-                updated += 1
+        cancelled = False
+        try:
+            for index, path in enumerate(paths, start=1):
+                if progress.wasCanceled():
+                    cancelled = True
+                    break
+                if self._plugin.refresh_metadata(path):
+                    updated += 1
+                progress.setValue(index)
+                QApplication.processEvents()
+            if not cancelled:
+                progress.setValue(len(paths))
+        finally:
+            progress.close()
+
         if updated:
-            self.status_message.emit(f"{updated} Dateien neu indiziert.")
             self.library_changed.emit()
+
+        if cancelled:
+            self.status_message.emit(f"{updated} Dateien neu indiziert (abgebrochen).")
+        elif updated:
+            self.status_message.emit(f"{updated} Dateien neu indiziert.")
         else:
             self.status_message.emit("Keine Dateien aktualisiert.")
 
@@ -2971,21 +3174,47 @@ class MediaLibraryWidget(QWidget):
         self._update_batch_button_state()
 
     def _populate_table(self, entries: List[tuple[MediaFile, Path]]) -> None:
+        header = self.table.horizontalHeader()
+        sorting_enabled = self.table.isSortingEnabled()
+        sort_section = header.sortIndicatorSection() if sorting_enabled else -1
+        sort_order = header.sortIndicatorOrder() if sorting_enabled else Qt.SortOrder.AscendingOrder
+
+        self.table.setSortingEnabled(False)
         self.table.blockSignals(True)
         self.table.setRowCount(len(entries))
         self._row_by_path = {}
         for row, (media, source_path) in enumerate(entries):
             abs_path = (source_path / Path(media.path)).resolve(strict=False)
+            display_name = Path(media.path).name
 
-            path_item = QTableWidgetItem(media.path)
+            path_item = QTableWidgetItem(display_name)
+            path_item.setToolTip(str(abs_path))
             path_item.setData(self.PATH_ROLE, str(abs_path))
             path_item.setData(self.KIND_ROLE, media.kind)
+            path_item.setData(Qt.ItemDataRole.UserRole, display_name.lower())
             self.table.setItem(row, 0, path_item)
-            self.table.setItem(row, 1, QTableWidgetItem(str(media.size)))
-            self.table.setItem(row, 2, QTableWidgetItem(str(media.mtime)))
-            self.table.setItem(row, 3, QTableWidgetItem(media.kind))
+
+            size_item = QTableWidgetItem(self._format_size(media.size))
+            size_item.setData(Qt.ItemDataRole.UserRole, int(media.size))
+            size_item.setTextAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+            self.table.setItem(row, 1, size_item)
+
+            mtime_item = QTableWidgetItem(self._format_datetime(media.mtime))
+            mtime_item.setData(Qt.ItemDataRole.UserRole, float(media.mtime))
+            mtime_item.setTextAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+            self.table.setItem(row, 2, mtime_item)
+
+            kind_text = media.kind.capitalize() if media.kind else "—"
+            kind_item = QTableWidgetItem(kind_text)
+            kind_item.setData(Qt.ItemDataRole.UserRole, (media.kind or "").lower())
+            self.table.setItem(row, 3, kind_item)
+
             self._row_by_path[str(abs_path)] = row
+
         self.table.blockSignals(False)
+        self.table.setSortingEnabled(True)
+        if sorting_enabled and sort_section >= 0 and self.table.rowCount() > 0:
+            self.table.sortItems(sort_section, sort_order)
 
     def _populate_gallery(self, entries: List[tuple[MediaFile, Path]]) -> None:
         self.gallery.setUpdatesEnabled(False)
@@ -3972,17 +4201,34 @@ class MediaLibraryPlugin(BasePlugin):
 
     # --- attribute & preset helpers ------------------------------------
 
-    def set_rating(self, path: Path, rating: Optional[int]) -> None:
-        if self._index.set_rating(path, rating):
-            self._cover_cache.invalidate(path)
-            if self._widget:
-                self._widget.evict_metadata_cache(path)
+    def set_rating(
+        self,
+        path: Path,
+        rating: Optional[int],
+        *,
+        emit_status: bool = True,
+        refresh: bool = True,
+    ) -> bool:
+        if not self._index.set_rating(path, rating):
+            return False
+        self._cover_cache.invalidate(path)
+        if self._widget:
+            self._widget.evict_metadata_cache(path)
+            if emit_status:
                 self._widget.status_message.emit(
                     f"Bewertung aktualisiert: {path.name} → {rating or 0} Sterne"
                 )
+            if refresh:
                 self._widget.library_changed.emit()
+        return True
 
-    def apply_tag_updates(self, updates: Dict[Path, List[str]], status_message: Optional[str] = None) -> int:
+    def apply_tag_updates(
+        self,
+        updates: Dict[Path, List[str]],
+        status_message: Optional[str] = None,
+        *,
+        refresh: bool = True,
+    ) -> int:
         cleaned: Dict[Path, List[str]] = {}
         for raw_path, tags in updates.items():
             path_obj = Path(raw_path)
@@ -3999,11 +4245,20 @@ class MediaLibraryPlugin(BasePlugin):
         if updated and self._widget:
             if status_message:
                 self._widget.status_message.emit(status_message)
-            self._widget.library_changed.emit()
+            if refresh:
+                self._widget.library_changed.emit()
         return updated
 
-    def set_tags(self, path: Path, tags: Iterable[str]) -> None:
-        self.apply_tag_updates({path: list(tags)}, f"Tags aktualisiert: {path.name}")
+    def set_tags(
+        self,
+        path: Path,
+        tags: Iterable[str],
+        *,
+        emit_status: bool = True,
+        refresh: bool = True,
+    ) -> bool:
+        message = f"Tags aktualisiert: {path.name}" if emit_status else None
+        return bool(self.apply_tag_updates({path: list(tags)}, message, refresh=refresh))
 
     def get_file_attributes(self, path: Path) -> Tuple[Optional[int], Tuple[str, ...]]:
         return self._index.get_attributes(path)
