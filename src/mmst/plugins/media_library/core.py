@@ -1,10 +1,14 @@
 from __future__ import annotations
 
+import logging
 import os
 import sqlite3
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable, Iterable, List, Optional, Tuple
+
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True)
@@ -83,9 +87,92 @@ class LibraryIndex:
         self._conn.commit()
 
     def list_files(self, limit: int = 100) -> List[MediaFile]:
+        return [entry[0] for entry in self.list_files_with_sources(limit)]
+
+    def list_files_with_sources(self, limit: int = 100) -> List[Tuple[MediaFile, Path]]:
         cur = self._conn.cursor()
-        cur.execute("SELECT path, size, mtime, kind FROM files ORDER BY id DESC LIMIT ?", (limit,))
-        return [MediaFile(path=str(r[0]), size=int(r[1]), mtime=float(r[2]), kind=str(r[3])) for r in cur.fetchall()]
+        cur.execute(
+            """
+            SELECT f.path, f.size, f.mtime, f.kind, s.path
+            FROM files AS f
+            JOIN sources AS s ON s.id = f.source_id
+            ORDER BY f.id DESC
+            LIMIT ?
+            """,
+            (limit,),
+        )
+        rows = cur.fetchall()
+        results: List[Tuple[MediaFile, Path]] = []
+        for row in rows:
+            media = MediaFile(path=str(row[0]), size=int(row[1]), mtime=float(row[2]), kind=str(row[3]))
+            source_path = Path(str(row[4]))
+            results.append((media, source_path))
+        return results
+    
+    def add_file_by_path(self, file_path: Path) -> bool:
+        """Add a single file to the index by absolute path.
+        
+        Finds the appropriate source and adds the file.
+        Returns True if successful, False otherwise.
+        """
+        # Find which source this file belongs to
+        sources = self.list_sources()
+        for source_id, source_path in sources:
+            source_path_obj = Path(source_path)
+            try:
+                if file_path.is_relative_to(source_path_obj):
+                    # File belongs to this source
+                    rel_path = str(file_path.relative_to(source_path_obj))
+                    stat = file_path.stat()
+                    meta = MediaFile(
+                        path=rel_path,
+                        size=int(stat.st_size),
+                        mtime=float(stat.st_mtime),
+                        kind=infer_kind(file_path),
+                    )
+                    self.upsert_file(source_id, rel_path, meta)
+                    logger.debug(f"Added file to index: {file_path}")
+                    return True
+            except (ValueError, OSError) as e:
+                logger.debug(f"Failed to check source {source_path}: {e}")
+                continue
+        
+        logger.warning(f"File not in any source: {file_path}")
+        return False
+    
+    def remove_file_by_path(self, file_path: Path) -> bool:
+        """Remove a single file from the index by absolute path.
+        
+        Finds the appropriate source and removes the file.
+        Returns True if successful, False otherwise.
+        """
+        sources = self.list_sources()
+        for source_id, source_path in sources:
+            source_path_obj = Path(source_path)
+            try:
+                if file_path.is_relative_to(source_path_obj):
+                    rel_path = str(file_path.relative_to(source_path_obj))
+                    self._conn.execute(
+                        "DELETE FROM files WHERE source_id=? AND path=?",
+                        (source_id, rel_path),
+                    )
+                    self._conn.commit()
+                    logger.debug(f"Removed file from index: {file_path}")
+                    return True
+            except (ValueError, OSError) as e:
+                logger.debug(f"Failed to check source {source_path}: {e}")
+                continue
+        
+        logger.warning(f"File not in any source: {file_path}")
+        return False
+    
+    def update_file_by_path(self, file_path: Path) -> bool:
+        """Update a file's metadata in the index by absolute path.
+        
+        This is essentially the same as add_file_by_path (uses upsert).
+        Returns True if successful, False otherwise.
+        """
+        return self.add_file_by_path(file_path)
 
 
 def infer_kind(path: Path) -> str:

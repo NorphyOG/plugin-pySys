@@ -46,7 +46,7 @@ Das MMST soll eine plattformübergreifende (Windows & Linux) Python-Anwendung we
 
 **Status:** **MVP Abgeschlossen (Recording + EQ-DSP fertig)**
 
-### Arbeitsaufschlüsselung
+### Arbeitsaufschlüsselung (AudioTools)
 
 - **Core Services & Utilities**
   - [x] `AudioDeviceService` zur Geräteerkennung hinzugefügt.
@@ -78,7 +78,7 @@ Das MMST soll eine plattformübergreifende (Windows & Linux) Python-Anwendung we
 
 **Status:** **In Arbeit (Duplikate & Backup mit Fortschritt)**
 
-### Arbeitsaufschlüsselung
+### Arbeitsaufschlüsselung (FileManager)
 
 - **Feature: Duplikat-Scanner**
   - [x] **UI:** Tabellenansicht zur Anzeige der Duplikate mit Checkboxen zum Löschen.
@@ -104,22 +104,48 @@ Das MMST soll eine plattformübergreifende (Windows & Linux) Python-Anwendung we
 
 **Status:** **In Arbeit (MVP abgeschlossen)**
 
-### Arbeitsaufschlüsselung
+### Arbeitsaufschlüsselung (SystemTools)
 
 - **Core Library Service**
   - [x] Definieren einer Datenbank-Struktur (SQLite) zur Speicherung von Metadaten und Dateipfaden.
   - [x] "Steam-ähnliche" Verwaltung von Bibliotheksordnern (mehrere Quellen auf verschiedenen Laufwerken).
-  - [ ] **(Nächste Phase)** Echtzeit-Ordnerüberwachung (`watchdog`-Bibliothek) zur automatischen Aktualisierung der Bibliothek.
+  - [x] **Echtzeit-Ordnerüberwachung** (`watchdog`-Bibliothek) zur automatischen Aktualisierung der Bibliothek.
+    - [x] FileSystemWatcher mit Observer für created/modified/deleted/moved Events.
+    - [x] Automatische SQLite-Updates beim Erkennen von Dateiänderungen.
+    - [x] UI-Toggle zum Aktivieren/Deaktivieren der Überwachung.
+    - [x] 15 Unit-Tests für Watcher-Funktionalität.
 
 - **UI / Frontend**
   - [x] **MVP:** Tabellen-Ansicht mit Quellenverwaltung, Scannen mit Fortschritt, Liste indizierter Dateien.
-  - [ ] **(Erweitert)** Kachel-basierte Ansicht mit Covern und Titeln.
-  - [ ] **(Erweitert)** Detailansicht, die alle Metadaten anzeigt.
-  - [ ] **(Erweitert)** Mächtige Filter- und Sortierfunktionen (nach Genre, Bewertung, Datum etc.).
+  - [x] **(Erweitert)** Kachel-basierte Ansicht mit Covern und Titeln.
+    - `QListWidget`-Galerie mit Cover-Thumbnails (192×192), Hover-Titeln und Doppelklick-Öffnung des Metadaten-Editors.
+    - Zentrales `CoverCache`-Backend mit Platzhalterfarben, Mutagen-Parsing und Observer-Signalen zur Synchronisierung zwischen Tabelle und Galerie.
+    - Live-Refresh der Galerie bei Watcher-Events sowie nach Cover-Änderungen im Editor.
+  - [x] **(Erweitert)** Detailansicht, die alle Metadaten anzeigt.
+    - Master/Detail-Split-View mit großem Cover-Preview (240²), dynamischen Tabs (Überblick, Metadaten, Technisch) und Kommentar-Viewer.
+    - Sofortige Aktualisierung nach Selektion in Tabelle/Galerie inkl. Cursor-Synchronisation und Platzhalter, falls keine Auswahl vorhanden.
+    - Metadaten werden cached (`MetadataReader` + Lazy-Load) und bei Watcher-/Editor-Events automatisch invalidiert.
+  - [x] **(Erweitert)** Mächtige Filter- und Sortierfunktionen (nach Genre, Bewertung, Datum etc.).
+    - Filterleiste mit Suchfeld, Typ-Dropdown, Sortierauswahl und Preset-Selector (Audio/Video/Favoriten, Zuletzt geändert).
+    - Textsuche greift auf gecachte Metadaten (Titel, Künstler, Album) zurück; Favoritenfilter nutzt Bewertungen ≥4 Sterne.
+    - Kombinierbare Sortierung (zuletzt hinzugefügt, MTime, Name, Größe) sowie sofortiges Re-Populieren von Tabelle/Galerie.
+  - [x] **(Erweitert)** Quick-Actions in der Galerie (z.B. „Abspielen“, „Im Explorer öffnen“).
+    - Kontextmenü für Tabelle & Galerie mit „Abspielen/Öffnen“ und „Im Ordner anzeigen“ inkl. Windows-Explorer-Select.
+    - Statusmeldungen bei Erfolg/Fehlschlag sowie Konsistenz mit Detailauswahl und Cache-Verhalten.
 
-- **Metadaten-Engine**
-  - [ ] **Editor:** Eine "Calibre-ähnliche" Bearbeitungsmaske für alle Metadatenfelder.
-  - [ ] **Reader/Writer:** Integration von `mutagen` (Audio) und `pymediainfo` (Video/MKV), um Metadaten direkt aus den Dateien zu lesen und zu schreiben.
+#### Nächster Schwerpunkt (Iteration 5)
+
+- Inline-Bearbeitung für Bewertung & Tags direkt aus der Detailansicht (Stern-Badges, Tag-Chips mit Persistenz).
+- Speichern/Laden benutzerdefinierter Filter-Presets (JSON im Config-Store, Sync mit UI).
+- Stapelaktionen für Mehrfachauswahl (Metadaten-Dialog im Batch, Cover-Neuladung, Watcher-Refresh).
+- Externer Player-Button in Detail & Kontextmenü (pro Dateityp konfigurierbar, nutzt neues Integrations-Modul).
+- Zusätzliche Tests: UI-Filter-Coverage, Kontextmenü-Stubs, Persistenz der Preset-Konfiguration.
+
+- **Metadaten-Engine** ✅ **Abgeschlossen**
+  - [x] **Editor:** Eine "Calibre-ähnliche" Bearbeitungsmaske für alle Metadatenfelder (4 Tabs: Common, Audio, Video, Technical).
+  - [x] **Reader/Writer:** Integration von `mutagen` (Audio) und `pymediainfo` (Video/MKV), um Metadaten direkt aus den Dateien zu lesen und zu schreiben.
+  - [x] **UI-Integration:** Doppelklick auf Datei öffnet Metadaten-Editor, Speichern schreibt Tags direkt in Dateien.
+  - [x] **Tests:** 12 Unit-Tests für MetadataReader, MetadataWriter und MediaMetadata-Dataclass.
   - [ ] **Scraper (Optional):** Ein Online-Scraper, der versucht, Metadaten basierend auf dem Dateinamen zu finden (z.B. von TheMovieDB).
 
 - **Integrationen**

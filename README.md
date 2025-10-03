@@ -22,7 +22,7 @@ Der Core verwaltet Lebenszyklus, Benutzeroberfläche und gemeinsame Dienste, wä
 | ------ | ------------- | ------ |
 | `FileManagerPlugin` (`mmst.file_manager`) | Duplikat-Scanner mit Hash-Gruppierung, sicherer Löschfunktion und dateibasierten Backups mit Fortschrittsanzeige | ✅ MVP |
 | `AudioToolsPlugin` (`mmst.audio_tools`) | Echtzeit-10-Band-Equalizer mit scipy DSP, WAV-Recorder mit Metadaten, Preset-Verwaltung | ✅ MVP |
-| `MediaLibraryPlugin` (`mmst.media_library`) | SQLite-basierte Medienbibliothek mit Quellenverwaltung, asynchronem Scannen und Tabellenansicht | ✅ MVP |
+| `MediaLibraryPlugin` (`mmst.media_library`) | SQLite-basierte Medienbibliothek mit Quellenverwaltung, asynchronem Scannen, Tabellenansicht, Calibre-ähnlichem Metadaten-Editor (mutagen/pymediainfo) und Echtzeit-Ordnerüberwachung (watchdog) | ✅ MVP |
 | `SystemToolsPlugin` (`mmst.system_tools`) | Dateikonverter für Audio/Video/Bild mit ffmpeg/ImageMagick-Integration und Tool-Erkennung | ✅ MVP |
 
 Der Duplikat-Scanner nutzt parallele Threads, gruppiert Dateien anhand von SHA-256-Hashes und erlaubt das Löschen
