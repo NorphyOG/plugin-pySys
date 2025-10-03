@@ -2,6 +2,8 @@
 import numpy as np
 import pytest
 
+pytest.importorskip("scipy")
+
 from mmst.plugins.audio_tools.equalizer import BandConfig, EqualizerEngine
 
 

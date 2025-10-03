@@ -312,6 +312,36 @@ class LibraryIndex:
                 )
             self._conn.commit()
             return removed
+
+    def reorder_playlist_items(self, playlist_id: int, paths: Iterable[Path]) -> bool:
+        ordered_rows: List[Tuple[int, int, str, int]] = []
+        for position, candidate in enumerate(paths, start=1):
+            path_obj = candidate if isinstance(candidate, Path) else Path(str(candidate))
+            resolved = self._resolve_source(path_obj)
+            if resolved is None:
+                continue
+            source_id, rel_path = resolved
+            ordered_rows.append((position, int(source_id), str(rel_path), int(playlist_id)))
+
+        if not ordered_rows:
+            return False
+
+        with self._lock:
+            cur = self._conn.cursor()
+            cur.executemany(
+                """
+            UPDATE playlist_items
+               SET position = ?
+             WHERE source_id = ? AND path = ? AND playlist_id = ?
+                """,
+                ordered_rows,
+            )
+            cur.execute(
+                "UPDATE playlists SET updated = strftime('%s','now') WHERE id = ?",
+                (int(playlist_id),),
+            )
+            self._conn.commit()
+        return True
     
     def add_file_by_path(self, file_path: Path) -> bool:
         """Add a single file to the index by absolute path.

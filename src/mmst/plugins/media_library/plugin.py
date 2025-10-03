@@ -3,8 +3,10 @@ from __future__ import annotations
 import concurrent.futures
 import functools
 import logging
+import random
 import re
 import shlex
+import shutil
 import subprocess
 import sys
 from pathlib import Path
@@ -624,12 +626,206 @@ class CinemaModeWindow(QWidget):
         super().closeEvent(event)
 
 
+class PlaylistPlaybackWindow(QWidget):
+    closed = Signal()
+    status_message = Signal(str)
+
+    def __init__(
+        self,
+        playlist_name: str,
+        entries: List[Dict[str, Any]],
+        parent: Optional[QWidget] = None,
+    ) -> None:
+        super().__init__(parent)
+        if not HAS_QT_MULTIMEDIA:
+            raise RuntimeError("Playlist playback requires QtMultimedia.")
+
+        self.setWindowFlag(Qt.WindowType.Window)
+        self.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose, True)
+        self.setWindowTitle(f"Playlist abspielen – {playlist_name}")
+
+        self._playlist_name = playlist_name
+        self._entries = entries
+        self._current_index = -1
+        self._auto_advance = True
+        self._ignore_status = False
+
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(12, 12, 12, 12)
+        layout.setSpacing(8)
+
+        header_row = QHBoxLayout()
+        header_row.setContentsMargins(0, 0, 0, 0)
+        header_row.setSpacing(6)
+        self._playlist_label = QLabel(f"Playlist: {playlist_name}")
+        self._playlist_label.setStyleSheet("font-weight: 600;")
+        header_row.addWidget(self._playlist_label)
+        header_row.addStretch(1)
+        self._auto_checkbox = QCheckBox("Automatisch weiter")
+        self._auto_checkbox.setChecked(True)
+        self._auto_checkbox.toggled.connect(self._on_auto_toggled)
+        header_row.addWidget(self._auto_checkbox)
+        self._close_button = QToolButton(self)
+        self._close_button.setIcon(self.style().standardIcon(QStyle.StandardPixmap.SP_TitleBarCloseButton))
+        self._close_button.setToolTip("Fenster schließen")
+        self._close_button.clicked.connect(self.close)
+        header_row.addWidget(self._close_button)
+        layout.addLayout(header_row)
+
+        info_row = QHBoxLayout()
+        info_row.setContentsMargins(0, 0, 0, 0)
+        info_row.setSpacing(6)
+        self._now_playing_label = QLabel("Bereit")
+        self._now_playing_label.setWordWrap(True)
+        info_row.addWidget(self._now_playing_label, stretch=1)
+
+        controls_container = QWidget(self)
+        controls_layout = QHBoxLayout(controls_container)
+        controls_layout.setContentsMargins(0, 0, 0, 0)
+        controls_layout.setSpacing(4)
+        self._prev_button = QToolButton(controls_container)
+        self._prev_button.setIcon(self.style().standardIcon(QStyle.StandardPixmap.SP_MediaSkipBackward))
+        self._prev_button.setToolTip("Vorheriger Titel")
+        self._prev_button.clicked.connect(self.play_previous)
+        controls_layout.addWidget(self._prev_button)
+        self._next_button = QToolButton(controls_container)
+        self._next_button.setIcon(self.style().standardIcon(QStyle.StandardPixmap.SP_MediaSkipForward))
+        self._next_button.setToolTip("Nächster Titel")
+        self._next_button.clicked.connect(self.play_next)
+        controls_layout.addWidget(self._next_button)
+        info_row.addWidget(controls_container)
+        layout.addLayout(info_row)
+
+        self._preview = MediaPreviewWidget(self)
+        layout.addWidget(self._preview, stretch=1)
+
+        self._preview.status_message.connect(self.status_message.emit)
+        player = getattr(self._preview, "player", None)
+        if player is not None:
+            player.mediaStatusChanged.connect(self._handle_media_status)
+
+        self._update_navigation_buttons()
+
+    def start(self, start_index: int = 0) -> None:
+        if not self._entries:
+            self.status_message.emit("Playlist enthält keine abspielbaren Titel.")
+            return
+        index = max(0, min(int(start_index), len(self._entries) - 1))
+        self._load_index(index)
+        self.show()
+        self.raise_()
+        self.activateWindow()
+
+    def play_next(self) -> None:
+        self._advance(1, manual=True)
+
+    def play_previous(self) -> None:
+        self._advance(-1, manual=True)
+
+    def current_entry(self) -> Optional[Dict[str, Any]]:
+        if 0 <= self._current_index < len(self._entries):
+            return self._entries[self._current_index]
+        return None
+
+    def closeEvent(self, event: QCloseEvent) -> None:  # type: ignore[override]
+        try:
+            if self._preview is not None:
+                self._preview.stop()
+        finally:
+            self.closed.emit()
+        super().closeEvent(event)
+
+    def _on_auto_toggled(self, checked: bool) -> None:
+        self._auto_advance = bool(checked)
+
+    def _advance(self, step: int, *, manual: bool = False) -> None:
+        if not self._entries:
+            return
+        if self._current_index == -1:
+            target = 0
+        else:
+            target = self._current_index + step
+        if target < 0 or target >= len(self._entries):
+            if step > 0 and not manual:
+                self.status_message.emit("Playlist beendet.")
+            self._update_navigation_buttons()
+            return
+        self._load_index(target)
+
+    def _load_index(self, index: int) -> None:
+        if index < 0 or index >= len(self._entries):
+            return
+        entry = self._entries[index]
+        path_value = entry.get("path")
+        if not isinstance(path_value, Path):
+            return
+        if not path_value.exists():
+            self.status_message.emit(f"Datei nicht gefunden: {path_value}")
+            if self._auto_advance and len(self._entries) > 1:
+                self._advance(1)
+            return
+
+        kind_value = str(entry.get("kind") or "").strip().lower()
+        if kind_value not in {"audio", "video"}:
+            self.status_message.emit("Dieser Eintrag kann nicht wiedergegeben werden.")
+            if self._auto_advance:
+                self._advance(1)
+            return
+
+        display_title = entry.get("title") or path_value.name
+        subtitle = entry.get("subtitle") or ""
+        duration_text = entry.get("duration_text") or ""
+        parts = [f"{index + 1}/{len(self._entries)}", display_title]
+        if subtitle:
+            parts.append(subtitle)
+        if duration_text:
+            parts.append(duration_text)
+        self._now_playing_label.setText(" • ".join(parts))
+        self.setWindowTitle(f"Playlist abspielen – {self._playlist_name} ({index + 1}/{len(self._entries)})")
+
+        self._current_index = index
+        self._update_navigation_buttons()
+
+        self._ignore_status = True
+        try:
+            self._preview.set_media(path_value, kind_value)
+        finally:
+            self._ignore_status = False
+
+        player = getattr(self._preview, "player", None)
+        if player is not None:
+            player.play()
+
+    def _update_navigation_buttons(self) -> None:
+        has_prev = self._current_index > 0
+        has_next = self._current_index != -1 and self._current_index < len(self._entries) - 1
+        self._prev_button.setEnabled(has_prev)
+        self._next_button.setEnabled(has_next)
+
+    def _handle_media_status(self, status: int) -> None:
+        if self._ignore_status:
+            return
+        end_status = MediaPreviewWidget._media_status_value("EndOfMedia")
+        invalid_status = MediaPreviewWidget._media_status_value("InvalidMedia")
+        if status == invalid_status:
+            entry = self.current_entry()
+            if entry:
+                path_value = entry.get("path")
+                if isinstance(path_value, Path):
+                    self.status_message.emit(f"Wiedergabe fehlgeschlagen: {path_value.name}")
+            if self._auto_advance:
+                self._advance(1)
+            return
+        if status == end_status and self._auto_advance:
+            self._advance(1)
+
+
 from ...core.plugin_base import BasePlugin, PluginManifest
 from datetime import datetime
 
 from .core import LibraryIndex, MediaFile, scan_source
 from .ui_helpers import BatchMetadataDialog, RatingStarBar, TagEditor
-from .covers import CoverCache, PLACEHOLDER_COLORS
+from .covers import CoverCache, placeholder_pixmap
 from .metadata import MediaMetadata, MetadataReader
 from .watcher import FileSystemWatcher
 
@@ -672,9 +868,28 @@ class MediaLibraryWidget(QWidget):
         self._playlist_remove_button: Optional[QPushButton] = None
         self._playlist_rename_button: Optional[QPushButton] = None
         self._playlist_delete_button: Optional[QPushButton] = None
+        self._playlist_move_up_button: Optional[QToolButton] = None
+        self._playlist_move_down_button: Optional[QToolButton] = None
+        self._playlist_play_button: Optional[QPushButton] = None
         self._current_playlist_id: Optional[int] = None
+        self._playlist_player_window: Optional["PlaylistPlaybackWindow"] = None
         self.add_to_playlist_button: Optional[QToolButton] = None
         self._playlist_add_menu: Optional[QMenu] = None
+        self._browse_tab_widget: Optional[QWidget] = None
+        self._active_tag_label: Optional[QLabel] = None
+        self.tags_list: Optional[QListWidget] = None
+        self.tag_items_table: Optional[QTableWidget] = None
+        self._tag_filter_edit: Optional[QLineEdit] = None
+        self._tag_summary_label: Optional[QLabel] = None
+        self._tag_totals_label: Optional[QLabel] = None
+        self._tag_filter_hint_label: Optional[QLabel] = None
+        self._tag_show_library_button: Optional[QPushButton] = None
+        self._tag_rename_button: Optional[QPushButton] = None
+        self._tag_remove_button: Optional[QPushButton] = None
+        self._tag_add_to_playlist_button: Optional[QPushButton] = None
+        self._tag_create_playlist_button: Optional[QPushButton] = None
+        self._tag_summary: List[tuple[str, int]] = []
+        self._tag_entries_map: Dict[str, List[tuple[MediaFile, Path]]] = {}
         self._all_entries: List[tuple[MediaFile, Path]] = []
         self._filters = {
             "text": "",
@@ -683,6 +898,7 @@ class MediaLibraryWidget(QWidget):
             "preset": "recent",
             "rating": None,
             "genre": None,
+            "tag": None,
         }
         self._view_presets = {
             "recent": {"label": "Zuletzt hinzugefügt", "kind": "all", "sort": "recent"},
@@ -717,6 +933,7 @@ class MediaLibraryWidget(QWidget):
         self._build_sources_tab()
         self._build_browse_tab()
         self._build_gallery_tab()
+        self._build_tags_tab()
         self._build_playlists_tab()
         self._initialize_view_filters()
         self._restore_view_state()
@@ -786,6 +1003,7 @@ class MediaLibraryWidget(QWidget):
 
     def _build_browse_tab(self) -> None:
         tab = QWidget()
+        self._browse_tab_widget = tab
         layout = QVBoxLayout(tab)
 
         controls = QWidget()
@@ -850,6 +1068,14 @@ class MediaLibraryWidget(QWidget):
 
         layout.addWidget(controls)
 
+        self._active_tag_label = QLabel()
+        self._active_tag_label.setObjectName("activeTagLabel")
+        self._active_tag_label.setStyleSheet(
+            "#activeTagLabel { color: rgba(255, 255, 255, 0.7); font-style: italic; padding-left: 4px; }"
+        )
+        self._active_tag_label.setVisible(False)
+        layout.addWidget(self._active_tag_label)
+
         self.table = QTableWidget()
         self.table.setColumnCount(4)
         self.table.setHorizontalHeaderLabels(["Pfad", "Größe", "MTime", "Typ"])
@@ -893,6 +1119,115 @@ class MediaLibraryWidget(QWidget):
         self.gallery.horizontalScrollBar().valueChanged.connect(self._on_gallery_scrolled)
         layout.addWidget(self.gallery, stretch=1)
         self.tabs.addTab(tab, "Galerie")
+
+    def _build_tags_tab(self) -> None:
+        tab = QWidget()
+        layout = QVBoxLayout(tab)
+        layout.setContentsMargins(8, 8, 8, 8)
+        layout.setSpacing(8)
+
+        header_row = QHBoxLayout()
+        header_row.setContentsMargins(0, 0, 0, 0)
+        header_label = QLabel("Tags")
+        header_label.setStyleSheet("font-weight: 600;")
+        header_row.addWidget(header_label)
+        header_row.addStretch(1)
+        self._tag_totals_label = QLabel("Keine Tags")
+        header_row.addWidget(self._tag_totals_label)
+        layout.addLayout(header_row)
+
+        filter_row = QHBoxLayout()
+        filter_row.setContentsMargins(0, 0, 0, 0)
+        filter_row.setSpacing(6)
+        filter_label = QLabel("Filter:")
+        filter_row.addWidget(filter_label)
+        self._tag_filter_edit = QLineEdit()
+        self._tag_filter_edit.setPlaceholderText("Tags durchsuchen…")
+        self._tag_filter_edit.textChanged.connect(self._on_tag_filter_changed)
+        filter_row.addWidget(self._tag_filter_edit, stretch=1)
+        clear_filter = QPushButton("Leeren")
+        clear_filter.clicked.connect(self._tag_filter_edit.clear)
+        filter_row.addWidget(clear_filter)
+        layout.addLayout(filter_row)
+
+        splitter = QSplitter(Qt.Orientation.Horizontal, tab)
+
+        left_panel = QWidget(splitter)
+        left_layout = QVBoxLayout(left_panel)
+        left_layout.setContentsMargins(0, 0, 0, 0)
+        left_layout.setSpacing(6)
+        tags_label = QLabel("Alle Tags")
+        tags_label.setStyleSheet("font-weight: 600;")
+        left_layout.addWidget(tags_label)
+        self.tags_list = QListWidget(left_panel)
+        self.tags_list.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
+        self.tags_list.currentItemChanged.connect(self._on_tag_selection_changed)
+        left_layout.addWidget(self.tags_list, stretch=1)
+
+        right_panel = QWidget(splitter)
+        right_layout = QVBoxLayout(right_panel)
+        right_layout.setContentsMargins(0, 0, 0, 0)
+        right_layout.setSpacing(6)
+        self._tag_summary_label = QLabel("Kein Tag ausgewählt", right_panel)
+        self._tag_summary_label.setStyleSheet("font-weight: 600;")
+        right_layout.addWidget(self._tag_summary_label)
+
+        actions_row = QHBoxLayout()
+        actions_row.setContentsMargins(0, 0, 0, 0)
+        actions_row.setSpacing(6)
+        self._tag_show_library_button = QPushButton("In Bibliothek anzeigen", right_panel)
+        self._tag_show_library_button.clicked.connect(self._on_tag_show_in_library)
+        self._tag_show_library_button.setEnabled(False)
+        actions_row.addWidget(self._tag_show_library_button)
+        self._tag_rename_button = QPushButton("Tag umbenennen…", right_panel)
+        self._tag_rename_button.clicked.connect(self._rename_current_tag)
+        self._tag_rename_button.setEnabled(False)
+        actions_row.addWidget(self._tag_rename_button)
+        self._tag_remove_button = QPushButton("Tag entfernen", right_panel)
+        self._tag_remove_button.clicked.connect(self._remove_tag_from_selection)
+        self._tag_remove_button.setEnabled(False)
+        actions_row.addWidget(self._tag_remove_button)
+
+        self._tag_create_playlist_button = QPushButton("Playlist aus Tag…", right_panel)
+        self._tag_create_playlist_button.clicked.connect(self._create_playlist_from_tag)
+        self._tag_create_playlist_button.setEnabled(False)
+        actions_row.addWidget(self._tag_create_playlist_button)
+
+        self._tag_add_to_playlist_button = QPushButton("Zu Playlist hinzufügen…", right_panel)
+        self._tag_add_to_playlist_button.clicked.connect(self._on_tag_add_to_playlist)
+        self._tag_add_to_playlist_button.setEnabled(False)
+        actions_row.addWidget(self._tag_add_to_playlist_button)
+        actions_row.addStretch(1)
+        right_layout.addLayout(actions_row)
+
+        self._tag_filter_hint_label = QLabel("", right_panel)
+        self._tag_filter_hint_label.setStyleSheet("color: rgba(255, 255, 255, 0.6); font-style: italic;")
+        self._tag_filter_hint_label.setVisible(False)
+        right_layout.addWidget(self._tag_filter_hint_label)
+
+        self.tag_items_table = QTableWidget(0, 4, right_panel)
+        self.tag_items_table.setHorizontalHeaderLabels(["Titel", "Pfad", "Typ", "Bewertung"])
+        self.tag_items_table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
+        self.tag_items_table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
+        self.tag_items_table.setSelectionMode(QAbstractItemView.SelectionMode.ExtendedSelection)
+        self.tag_items_table.verticalHeader().setVisible(False)
+        header = self.tag_items_table.horizontalHeader()
+        header.setStretchLastSection(False)
+        header.setSectionResizeMode(0, QHeaderView.ResizeMode.Stretch)
+        header.setSectionResizeMode(1, QHeaderView.ResizeMode.Stretch)
+        header.setSectionResizeMode(2, QHeaderView.ResizeMode.ResizeToContents)
+        header.setSectionResizeMode(3, QHeaderView.ResizeMode.ResizeToContents)
+        self.tag_items_table.itemDoubleClicked.connect(self._on_tag_item_double_clicked)
+        self.tag_items_table.itemSelectionChanged.connect(self._on_tag_item_selection_changed)
+        right_layout.addWidget(self.tag_items_table, stretch=1)
+
+        splitter.addWidget(left_panel)
+        splitter.addWidget(right_panel)
+        splitter.setStretchFactor(0, 1)
+        splitter.setStretchFactor(1, 2)
+
+        layout.addWidget(splitter, stretch=1)
+        self.tabs.addTab(tab, "Tags")
 
     def _build_playlists_tab(self) -> None:
         tab = QWidget()
@@ -954,9 +1289,30 @@ class MediaLibraryWidget(QWidget):
         self._playlist_add_selection_button.clicked.connect(self._add_selected_media_to_playlist)
         action_row.addWidget(self._playlist_add_selection_button)
 
+        self._playlist_play_button = QPushButton("Playlist abspielen", right_panel)
+        self._playlist_play_button.clicked.connect(self._play_selected_playlist)
+        if not HAS_QT_MULTIMEDIA:
+            self._playlist_play_button.setEnabled(False)
+            self._playlist_play_button.setToolTip("QtMultimedia nicht verfügbar")
+        action_row.addWidget(self._playlist_play_button)
+
         self._playlist_remove_button = QPushButton("Entfernen", right_panel)
         self._playlist_remove_button.clicked.connect(self._remove_selected_playlist_items)
         action_row.addWidget(self._playlist_remove_button)
+
+        self._playlist_move_up_button = QToolButton(right_panel)
+        self._playlist_move_up_button.setIcon(self.style().standardIcon(QStyle.StandardPixmap.SP_ArrowUp))
+        self._playlist_move_up_button.setToolTip("Auswahl nach oben verschieben")
+        self._playlist_move_up_button.clicked.connect(self._move_playlist_items_up)
+        self._playlist_move_up_button.setEnabled(False)
+        action_row.addWidget(self._playlist_move_up_button)
+
+        self._playlist_move_down_button = QToolButton(right_panel)
+        self._playlist_move_down_button.setIcon(self.style().standardIcon(QStyle.StandardPixmap.SP_ArrowDown))
+        self._playlist_move_down_button.setToolTip("Auswahl nach unten verschieben")
+        self._playlist_move_down_button.clicked.connect(self._move_playlist_items_down)
+        self._playlist_move_down_button.setEnabled(False)
+        action_row.addWidget(self._playlist_move_down_button)
 
         action_row.addStretch(1)
         right_layout.addLayout(action_row)
@@ -1159,10 +1515,12 @@ class MediaLibraryWidget(QWidget):
             raw = item.data(self.PATH_ROLE)
             if raw:
                 paths.add(str(raw))
-        for item in self.gallery.selectedItems():
-            raw = item.data(self.PATH_ROLE)
-            if raw:
-                paths.add(str(raw))
+        gallery_widget = getattr(self, "gallery", None)
+        if gallery_widget is not None:
+            for item in gallery_widget.selectedItems():
+                raw = item.data(self.PATH_ROLE)
+                if raw:
+                    paths.add(str(raw))
         return [Path(p) for p in paths]
 
     def _update_batch_button_state(self) -> None:
@@ -1712,6 +2070,18 @@ class MediaLibraryWidget(QWidget):
 
     def _refresh_playlists(self, select_id: Optional[int] = None) -> None:
         target_id = select_id if select_id is not None else self._current_playlist_id
+        if not hasattr(self._plugin, "list_playlists"):
+            self._playlists_cache = []
+            if self.playlists_list is not None:
+                self.playlists_list.clear()
+            if self.playlist_items_table is not None:
+                self.playlist_items_table.setRowCount(0)
+            if self.playlist_title_label is not None:
+                self.playlist_title_label.setText("Keine Playlist-Unterstützung")
+            self._update_playlist_add_menu()
+            self._update_add_to_playlist_button_state()
+            self._update_playlist_controls_state()
+            return
         self._playlists_cache = self._plugin.list_playlists()
 
         if self.playlists_list is not None:
@@ -1742,6 +2112,7 @@ class MediaLibraryWidget(QWidget):
         self._update_playlist_add_menu()
         self._update_add_to_playlist_button_state()
         self._update_playlist_controls_state()
+        self._update_tag_action_state()
 
     def _playlist_entry_by_id(self, playlist_id: Optional[int]) -> Optional[Dict[str, Any]]:
         if playlist_id is None:
@@ -1750,6 +2121,32 @@ class MediaLibraryWidget(QWidget):
             if int(entry["id"]) == int(playlist_id):
                 return entry
         return None
+
+    def _add_paths_to_playlist(self, playlist_id: int, paths: Iterable[Path]) -> tuple[int, int]:
+        unique_paths: List[Path] = []
+        seen: Set[str] = set()
+        for raw in paths:
+            candidate = raw if isinstance(raw, Path) else Path(str(raw))
+            key = str(candidate)
+            if key in seen:
+                continue
+            seen.add(key)
+            unique_paths.append(candidate)
+
+        added = 0
+        skipped = 0
+        for candidate in unique_paths:
+            if self._plugin.add_to_playlist(playlist_id, candidate):
+                added += 1
+            else:
+                skipped += 1
+
+        if added:
+            select_target = self._current_playlist_id if self._current_playlist_id is not None else playlist_id
+            self._refresh_playlists(select_id=select_target)
+            if self._current_playlist_id == playlist_id:
+                self._refresh_playlist_items(playlist_id)
+        return added, skipped
 
     def _update_playlist_add_menu(self) -> None:
         if self._playlist_add_menu is None:
@@ -1778,10 +2175,17 @@ class MediaLibraryWidget(QWidget):
     def _update_playlist_controls_state(self) -> None:
         has_playlists = bool(self._playlists_cache)
         has_selection = self._current_playlist_id is not None
-        has_media_selection = self._selected_path is not None
+        selection_paths = self._selected_paths()
+        has_media_selection = bool(selection_paths) or self._selected_path is not None
         has_item_selection = False
-        if self.playlist_items_table is not None and self.playlist_items_table.selectionModel() is not None:
-            has_item_selection = self.playlist_items_table.selectionModel().hasSelection()
+        selected_rows: List[int] = []
+        total_items = 0
+        if self.playlist_items_table is not None:
+            total_items = self.playlist_items_table.rowCount()
+            selection_model = self.playlist_items_table.selectionModel()
+            if selection_model is not None:
+                selected_rows = [index.row() for index in selection_model.selectedRows()]
+                has_item_selection = bool(selected_rows)
 
         if self._playlist_rename_button is not None:
             self._playlist_rename_button.setEnabled(has_selection)
@@ -1791,6 +2195,21 @@ class MediaLibraryWidget(QWidget):
             self._playlist_add_selection_button.setEnabled(has_selection and has_media_selection)
         if self._playlist_remove_button is not None:
             self._playlist_remove_button.setEnabled(has_selection and has_item_selection)
+        if self._playlist_move_up_button is not None:
+            can_move_up = has_selection and has_item_selection and any(row > 0 for row in selected_rows)
+            self._playlist_move_up_button.setEnabled(can_move_up)
+        if self._playlist_move_down_button is not None:
+            can_move_down = has_selection and has_item_selection and any(row < total_items - 1 for row in selected_rows)
+            self._playlist_move_down_button.setEnabled(can_move_down)
+        if self._playlist_play_button is not None:
+            can_play = has_selection and total_items > 0 and HAS_QT_MULTIMEDIA
+            self._playlist_play_button.setEnabled(can_play)
+            if not HAS_QT_MULTIMEDIA:
+                self._playlist_play_button.setToolTip("QtMultimedia nicht verfügbar")
+            elif can_play:
+                self._playlist_play_button.setToolTip("Playlist abspielen")
+            else:
+                self._playlist_play_button.setToolTip("")
         if self.playlists_list is not None and not has_playlists:
             self.playlists_list.setCurrentRow(-1)
 
@@ -1798,12 +2217,16 @@ class MediaLibraryWidget(QWidget):
         self, current: Optional[QListWidgetItem], previous: Optional[QListWidgetItem]
     ) -> None:
         if current is None:
+            if self._playlist_player_window is not None:
+                self._playlist_player_window.close()
             self._current_playlist_id = None
             self._refresh_playlist_items(None)
             self._update_playlist_controls_state()
             return
         data = current.data(Qt.ItemDataRole.UserRole)
         playlist_id = int(data) if isinstance(data, int) else None
+        if playlist_id != self._current_playlist_id and self._playlist_player_window is not None:
+            self._playlist_player_window.close()
         self._current_playlist_id = playlist_id
         self._refresh_playlist_items(playlist_id)
         self._update_playlist_controls_state()
@@ -1903,31 +2326,43 @@ class MediaLibraryWidget(QWidget):
         if self._current_playlist_id is None:
             self.status_message.emit("Bitte zuerst eine Playlist auswählen.")
             return
-        if self._selected_path is None:
-            self.status_message.emit("Keine Mediendatei ausgewählt.")
+        paths = self._selected_paths()
+        if not paths and self._selected_path is not None:
+            paths = [self._selected_path]
+        if not paths:
+            self.status_message.emit("Keine Mediendateien ausgewählt.")
             return
-        success = self._plugin.add_to_playlist(self._current_playlist_id, self._selected_path)
-        if success:
-            self.status_message.emit(f"Zur Playlist hinzugefügt: {self._selected_path.name}")
-            self._refresh_playlists(select_id=self._current_playlist_id)
-            self._refresh_playlist_items(self._current_playlist_id)
+
+        entry = self._playlist_entry_by_id(self._current_playlist_id)
+        playlist_name = entry["name"] if entry else f"Playlist {self._current_playlist_id}"
+        added, skipped = self._add_paths_to_playlist(self._current_playlist_id, paths)
+        parts: List[str] = []
+        if added:
+            parts.append(f"{added} neue Titel hinzugefügt")
+        if skipped:
+            parts.append(f"{skipped} bereits vorhanden")
+        if not parts:
+            summary = "Keine neuen Titel hinzugefügt"
         else:
-            self.status_message.emit("Datei bereits in der Playlist oder nicht verfügbar.")
+            summary = ", ".join(parts)
+        self.status_message.emit(f"{summary} (Playlist '{playlist_name}')")
 
     def _add_current_to_playlist(self, playlist_id: int) -> None:
-        if self._selected_path is None:
-            self.status_message.emit("Keine Mediendatei ausgewählt.")
+        paths = self._selected_paths()
+        if not paths and self._selected_path is not None:
+            paths = [self._selected_path]
+        if not paths:
+            self.status_message.emit("Keine Mediendateien ausgewählt.")
             return
-        success = self._plugin.add_to_playlist(playlist_id, self._selected_path)
         entry = self._playlist_entry_by_id(playlist_id)
-        name = entry["name"] if entry else f"Playlist {playlist_id}"
-        if success:
-            self.status_message.emit(f"Zur Playlist '{name}' hinzugefügt: {self._selected_path.name}")
-            self._refresh_playlists(select_id=self._current_playlist_id)
-            if self._current_playlist_id == int(playlist_id):
-                self._refresh_playlist_items(self._current_playlist_id)
+        playlist_name = entry["name"] if entry else f"Playlist {playlist_id}"
+        added, skipped = self._add_paths_to_playlist(playlist_id, paths)
+        if added:
+            self.status_message.emit(f"{added} Titel zur Playlist '{playlist_name}' hinzugefügt.")
+        elif skipped:
+            self.status_message.emit(f"Titel bereits in Playlist '{playlist_name}'.")
         else:
-            self.status_message.emit(f"Datei bereits in Playlist '{name}'.")
+            self.status_message.emit(f"Keine Titel zur Playlist '{playlist_name}' hinzugefügt.")
 
     def _remove_selected_playlist_items(self) -> None:
         if self._current_playlist_id is None or self.playlist_items_table is None:
@@ -1952,6 +2387,185 @@ class MediaLibraryWidget(QWidget):
             self._refresh_playlist_items(self._current_playlist_id)
         else:
             self.status_message.emit("Keine Titel entfernt.")
+
+    def _play_selected_playlist(self) -> None:
+        if not HAS_QT_MULTIMEDIA:
+            self.status_message.emit("QtMultimedia nicht verfügbar – Wiedergabe nicht möglich.")
+            return
+        if self._current_playlist_id is None:
+            self.status_message.emit("Bitte zuerst eine Playlist auswählen.")
+            return
+
+        raw_items = self._plugin.list_playlist_items(int(self._current_playlist_id))
+        playable: List[Dict[str, Any]] = []
+        skipped = 0
+        for index, (media, source_path) in enumerate(raw_items):
+            abs_path = (source_path / Path(media.path)).resolve(strict=False)
+            kind = str(getattr(media, "kind", "") or "").strip().lower()
+            if kind not in {"audio", "video"}:
+                skipped += 1
+                continue
+            metadata = self._get_cached_metadata(abs_path)
+            title = metadata.title if metadata and metadata.title else Path(media.path).stem
+            subtitle_parts: List[str] = []
+            if metadata and metadata.artist:
+                subtitle_parts.append(metadata.artist)
+            if metadata and metadata.album:
+                subtitle_parts.append(metadata.album)
+            subtitle = " • ".join(part for part in subtitle_parts if part)
+            duration_text = None
+            if metadata and metadata.duration:
+                duration_text = self._format_duration(metadata.duration)
+            playable.append(
+                {
+                    "path": abs_path,
+                    "kind": kind,
+                    "title": title,
+                    "subtitle": subtitle,
+                    "duration_text": duration_text,
+                    "source_index": index,
+                }
+            )
+
+        if not playable:
+            message = "Playlist enthält keine abspielbaren Audio- oder Videodateien."
+            if skipped:
+                message += f" ({skipped} Einträge übersprungen.)"
+            self.status_message.emit(message)
+            return
+
+        playlist_entry = self._playlist_entry_by_id(self._current_playlist_id)
+        playlist_name = playlist_entry["name"] if playlist_entry else f"Playlist {self._current_playlist_id}"
+
+        start_index = 0
+        if self.playlist_items_table is not None:
+            selection_model = self.playlist_items_table.selectionModel()
+            if selection_model is not None and selection_model.selectedRows():
+                selected_row = min(index.row() for index in selection_model.selectedRows())
+                for idx, entry in enumerate(playable):
+                    source_idx = entry.get("source_index")
+                    if isinstance(source_idx, int) and source_idx >= selected_row:
+                        start_index = idx
+                        break
+                else:
+                    start_index = len(playable) - 1
+
+        payload: List[Dict[str, Any]] = []
+        for entry in playable:
+            cloned = dict(entry)
+            cloned.pop("source_index", None)
+            payload.append(cloned)
+
+        if self._playlist_player_window is not None:
+            try:
+                self._playlist_player_window.close()
+            except RuntimeError:
+                pass
+            self._playlist_player_window = None
+
+        window = PlaylistPlaybackWindow(playlist_name, payload, parent=self)
+        window.closed.connect(self._on_playlist_player_closed)
+        window.status_message.connect(self.status_message.emit)
+        self._playlist_player_window = window
+
+        window.start(start_index)
+        if window.current_entry() is None:
+            return
+
+        if skipped:
+            word = "Eintrag" if skipped == 1 else "Einträge"
+            self.status_message.emit(
+                f"Playlist „{playlist_name}“ gestartet ({skipped} {word} übersprungen)."
+            )
+        else:
+            self.status_message.emit(f"Playlist „{playlist_name}“ gestartet.")
+
+    def _move_playlist_items_up(self) -> None:
+        self._move_playlist_items(-1)
+
+    def _move_playlist_items_down(self) -> None:
+        self._move_playlist_items(1)
+
+    def _move_playlist_items(self, offset: int) -> None:
+        if offset == 0 or self.playlist_items_table is None or self._current_playlist_id is None:
+            return
+
+        selection_model = self.playlist_items_table.selectionModel()
+        if selection_model is None or not selection_model.hasSelection():
+            return
+
+        selected_rows = sorted({index.row() for index in selection_model.selectedRows()})
+        if not selected_rows:
+            return
+
+        row_count = self.playlist_items_table.rowCount()
+        if offset > 0:
+            selected_rows = list(reversed(selected_rows))
+
+        current_order: List[str] = []
+        for row in range(row_count):
+            item = self.playlist_items_table.item(row, 0)
+            if item is None:
+                return
+            path_value = item.data(self.PATH_ROLE)
+            if not isinstance(path_value, str):
+                return
+            current_order.append(path_value)
+
+        selected_paths: Set[str] = set()
+        for row in selected_rows:
+            item = self.playlist_items_table.item(row, 0)
+            if item is None:
+                continue
+            path_value = item.data(self.PATH_ROLE)
+            if isinstance(path_value, str):
+                selected_paths.add(path_value)
+
+        moved = False
+        for row in selected_rows:
+            target = row + offset
+            if target < 0 or target >= row_count:
+                continue
+            current_order[row], current_order[target] = current_order[target], current_order[row]
+            moved = True
+
+        if not moved:
+            return
+
+        if not hasattr(self._plugin, "reorder_playlist_items"):
+            self.status_message.emit("Reihenfolge kann nicht gespeichert werden: Playlist-Funktion nicht verfügbar.")
+            return
+
+        ordered_paths = [Path(path_str) for path_str in current_order]
+        try:
+            success = self._plugin.reorder_playlist_items(self._current_playlist_id, ordered_paths)
+        except Exception as exc:  # pragma: no cover - defensive reporting
+            self.status_message.emit(f"Playlist-Reihenfolge fehlgeschlagen: {exc}")
+            success = False
+
+        if success:
+            self.status_message.emit("Playlist-Reihenfolge aktualisiert.")
+        else:
+            self.status_message.emit("Reihenfolge konnte nicht gespeichert werden.")
+
+        self._refresh_playlist_items(self._current_playlist_id)
+
+        if selected_paths and self.playlist_items_table is not None:
+            selection_model = self.playlist_items_table.selectionModel()
+            if selection_model is not None:
+                selection_model.clearSelection()
+            for row in range(self.playlist_items_table.rowCount()):
+                item = self.playlist_items_table.item(row, 0)
+                if item is None:
+                    continue
+                path_value = item.data(self.PATH_ROLE)
+                if isinstance(path_value, str) and path_value in selected_paths:
+                    self.playlist_items_table.selectRow(row)
+
+        self._update_playlist_controls_state()
+
+    def _on_playlist_player_closed(self) -> None:
+        self._playlist_player_window = None
 
     def _on_playlist_item_double_clicked(self, item: QTableWidgetItem) -> None:
         if item is None:
@@ -2069,6 +2683,15 @@ class MediaLibraryWidget(QWidget):
                 return
             except Exception:
                 pass
+        if sys.platform.startswith("linux"):
+            # Prefer xdg-open when available for better desktop integration.
+            xdg_open = shutil.which("xdg-open")
+            if xdg_open:
+                try:  # pragma: no cover - OS dependent
+                    subprocess.run([xdg_open, str(target)], check=False)
+                    return
+                except Exception:
+                    pass
         url = QUrl.fromLocalFile(str(target))
         if not QDesktopServices.openUrl(url):  # pragma: no cover - OS dependent
             self.status_message.emit(f"Ordner kann nicht geöffnet werden: {target}")
@@ -2102,6 +2725,7 @@ class MediaLibraryWidget(QWidget):
         self._filters["text"] = text
         self._filters["kind"] = preset.get("kind", "all")
         self._filters["sort"] = preset.get("sort", "recent")
+        self._filters["tag"] = None
 
         self.search_edit.blockSignals(True)
         self.search_edit.setText(text)
@@ -2169,9 +2793,11 @@ class MediaLibraryWidget(QWidget):
             self.table.setRowCount(0)
             self.gallery.clear()
             self._clear_detail_panel()
+            self._update_active_tag_label()
             self._persist_filters()
             return
         self._rebuild_filtered_entries()
+        self._update_active_tag_label()
         self._persist_filters()
 
     def _apply_filters(self, entries: List[tuple[MediaFile, Path]]) -> List[tuple[MediaFile, Path]]:
@@ -2182,6 +2808,8 @@ class MediaLibraryWidget(QWidget):
         kind_filter = self._filters.get("kind", "all")
         rating_min = self._filters.get("rating")
         genre_filter = self._filters.get("genre")
+        tag_filter = str(self._filters.get("tag") or "").strip()
+        tag_filter_lower = tag_filter.lower()
 
         filtered: List[tuple[MediaFile, Path]] = []
         for media, source_path in entries:
@@ -2203,6 +2831,16 @@ class MediaLibraryWidget(QWidget):
 
             if kind_filter != "all" and media.kind != kind_filter:
                 continue
+
+            if tag_filter:
+                tag_match = any(tag_filter_lower == tag.strip().lower() for tag in getattr(media, "tags", tuple()))
+                if not tag_match:
+                    if metadata is None:
+                        metadata = self._get_cached_metadata(abs_path)
+                    metadata_tags = getattr(metadata, "tags", []) or []
+                    tag_match = any(tag_filter_lower == str(tag).strip().lower() for tag in metadata_tags)
+                    if not tag_match:
+                        continue
 
             if rating_min is not None or genre_filter:
                 if metadata is None:
@@ -2316,6 +2954,7 @@ class MediaLibraryWidget(QWidget):
         }
         self._metadata_cache = {k: v for k, v in self._metadata_cache.items() if k in valid_keys}
         self._rebuild_filtered_entries()
+        self._refresh_tag_views()
 
     def _rebuild_filtered_entries(self) -> None:
         previous = self._selected_path
@@ -2378,12 +3017,10 @@ class MediaLibraryWidget(QWidget):
         icon = self._gallery_placeholder_icons.get(kind)
         if icon is not None:
             return icon
-        size = self.gallery.iconSize()
+        size = self.gallery.iconSize() if self.gallery else QSize(160, 160)
         if size.isEmpty():
             size = QSize(160, 160)
-        color = PLACEHOLDER_COLORS.get(kind, PLACEHOLDER_COLORS["other"])
-        pixmap = QPixmap(size)
-        pixmap.fill(color)
+        pixmap = placeholder_pixmap(kind, size)
         icon = QIcon(pixmap)
         self._gallery_placeholder_icons[kind] = icon
         return icon
@@ -2463,6 +3100,522 @@ class MediaLibraryWidget(QWidget):
     def _on_library_changed(self) -> None:
         self._refresh_library_views()
         self._refresh_playlists(select_id=self._current_playlist_id)
+
+    # --- tag view helpers ---------------------------------------------
+
+    def _current_tag_name(self) -> Optional[str]:
+        if self.tags_list is None:
+            return None
+        item = self.tags_list.currentItem()
+        if item is None:
+            return None
+        value = item.data(Qt.ItemDataRole.UserRole)
+        return str(value) if isinstance(value, str) else None
+
+    def _on_tag_filter_changed(self, _text: str) -> None:
+        previous = self._current_tag_name()
+        self._populate_tag_list(previous)
+
+    def _populate_tag_list(self, preferred: Optional[str]) -> None:
+        if self.tags_list is None:
+            return
+        filter_text = ""
+        if self._tag_filter_edit is not None:
+            filter_text = self._tag_filter_edit.text().strip().lower()
+
+        self.tags_list.blockSignals(True)
+        self.tags_list.clear()
+        match_item: Optional[QListWidgetItem] = None
+        for tag, count in self._tag_summary:
+            if filter_text and filter_text not in tag.lower():
+                continue
+            label = f"{tag} ({count})"
+            item = QListWidgetItem(label)
+            item.setData(Qt.ItemDataRole.UserRole, tag)
+            item.setToolTip(f"{count} Titel")
+            self.tags_list.addItem(item)
+            if preferred and match_item is None and tag == preferred:
+                match_item = item
+        self.tags_list.blockSignals(False)
+
+        if match_item is not None:
+            self.tags_list.setCurrentItem(match_item)
+            self._update_tag_action_state()
+            return
+        if self.tags_list.count() > 0:
+            self.tags_list.setCurrentRow(0)
+        else:
+            if self._tag_summary_label is not None:
+                if filter_text:
+                    self._tag_summary_label.setText("Keine Tags zum Filter gefunden")
+                else:
+                    self._tag_summary_label.setText("Keine Tags indiziert")
+            self._display_tag_items(None)
+            self._update_tag_action_state()
+            return
+
+        self._update_tag_action_state()
+
+    def _refresh_tag_views(self) -> None:
+        selected = self._current_tag_name()
+        summary: Dict[str, List[tuple[MediaFile, Path]]] = {}
+        for media, source_path in self._all_entries:
+            tags = getattr(media, "tags", tuple())
+            if not tags:
+                continue
+            for raw_tag in tags:
+                cleaned = raw_tag.strip()
+                if not cleaned:
+                    continue
+                bucket = summary.setdefault(cleaned, [])
+                bucket.append((media, source_path))
+        sorted_items = sorted(summary.items(), key=lambda item: (-len(item[1]), item[0].casefold()))
+        self._tag_entries_map = {tag: entries for tag, entries in sorted_items}
+        self._tag_summary = [(tag, len(entries)) for tag, entries in sorted_items]
+
+        if self._tag_totals_label is not None:
+            unique_count = len(self._tag_summary)
+            total_assignments = sum(count for _, count in self._tag_summary)
+            if unique_count == 0:
+                self._tag_totals_label.setText("Keine Tags")
+            elif unique_count == 1:
+                self._tag_totals_label.setText(f"1 Tag • {total_assignments} Titel")
+            else:
+                self._tag_totals_label.setText(f"{unique_count} Tags • {total_assignments} Titel")
+
+        self._populate_tag_list(selected)
+        if self.tags_list is None or self.tags_list.currentItem() is None:
+            if self._tag_summary_label is not None:
+                if self._tag_summary:
+                    self._tag_summary_label.setText("Tag-Auswahl fehlt")
+                else:
+                    self._tag_summary_label.setText("Keine Tags indiziert")
+            if self.tag_items_table is not None:
+                self.tag_items_table.setRowCount(0)
+        self._update_tag_action_state()
+
+    def _on_tag_selection_changed(
+        self, current: Optional[QListWidgetItem], _previous: Optional[QListWidgetItem]
+    ) -> None:
+        if current is None:
+            self._display_tag_items(None)
+            return
+        value = current.data(Qt.ItemDataRole.UserRole)
+        tag_name = str(value) if isinstance(value, str) else None
+        self._display_tag_items(tag_name)
+
+    def _display_tag_items(self, tag_name: Optional[str]) -> None:
+        if self.tag_items_table is None:
+            return
+        self.tag_items_table.setRowCount(0)
+        if not tag_name:
+            if self._tag_summary_label is not None:
+                self._tag_summary_label.setText("Kein Tag ausgewählt")
+            self._update_tag_action_state()
+            return
+
+        entries = self._tag_entries_map.get(tag_name, [])
+        self.tag_items_table.setRowCount(len(entries))
+        for row_index, (media, source_path) in enumerate(entries):
+            abs_path = (source_path / Path(media.path)).resolve(strict=False)
+            metadata = self._get_cached_metadata(abs_path)
+            title = metadata.title or Path(media.path).stem
+            title_item = QTableWidgetItem(title)
+            title_item.setData(self.PATH_ROLE, str(abs_path))
+            title_item.setToolTip(str(abs_path))
+            self.tag_items_table.setItem(row_index, 0, title_item)
+
+            path_item = QTableWidgetItem(str(abs_path))
+            path_item.setData(self.PATH_ROLE, str(abs_path))
+            path_item.setToolTip(str(abs_path))
+            self.tag_items_table.setItem(row_index, 1, path_item)
+
+            kind_text = metadata.format or media.kind.capitalize()
+            self.tag_items_table.setItem(row_index, 2, QTableWidgetItem(kind_text))
+
+            rating_text = self._format_rating(metadata.rating)
+            self.tag_items_table.setItem(row_index, 3, QTableWidgetItem(rating_text or "—"))
+
+        if self._tag_summary_label is not None:
+            count = len(entries)
+            suffix = "Titel" if count == 1 else "Titel"
+            self._tag_summary_label.setText(f"{tag_name} • {count} {suffix}")
+        self._update_tag_action_state()
+
+    def _on_tag_item_selection_changed(self) -> None:
+        self._update_tag_action_state()
+
+    def _update_tag_action_state(self) -> None:
+        tag_name = self._current_tag_name()
+        total_count = 0
+        selection_count = 0
+        if self.tag_items_table is not None:
+            total_count = self.tag_items_table.rowCount()
+            selection_model = self.tag_items_table.selectionModel()
+            if selection_model is not None:
+                selection_count = len(selection_model.selectedRows())
+
+        has_tag = bool(tag_name)
+
+        if self._tag_show_library_button is not None:
+            self._tag_show_library_button.setEnabled(has_tag)
+        if self._tag_rename_button is not None:
+            self._tag_rename_button.setEnabled(has_tag and total_count > 0)
+        if self._tag_remove_button is not None:
+            can_remove = has_tag and total_count > 0
+            self._tag_remove_button.setEnabled(can_remove)
+            if can_remove:
+                if selection_count > 0:
+                    self._tag_remove_button.setToolTip("Tag von ausgewählten Titeln entfernen")
+                else:
+                    self._tag_remove_button.setToolTip("Tag von allen Titeln entfernen")
+            else:
+                self._tag_remove_button.setToolTip("")
+        if self._tag_create_playlist_button is not None:
+            allow_create = has_tag and total_count > 0 and hasattr(self._plugin, "create_playlist")
+            self._tag_create_playlist_button.setEnabled(allow_create)
+            if allow_create:
+                if selection_count > 0:
+                    self._tag_create_playlist_button.setToolTip("Playlist aus Auswahl erzeugen")
+                else:
+                    self._tag_create_playlist_button.setToolTip("Playlist aus allen Titeln mit diesem Tag erzeugen")
+            else:
+                self._tag_create_playlist_button.setToolTip("")
+        if self._tag_add_to_playlist_button is not None:
+            allow_add = has_tag and total_count > 0 and bool(self._playlists_cache) and hasattr(
+                self._plugin, "add_to_playlist"
+            )
+            self._tag_add_to_playlist_button.setEnabled(allow_add)
+            if allow_add:
+                if selection_count > 0:
+                    self._tag_add_to_playlist_button.setToolTip("Auswahl zu einer Playlist hinzufügen")
+                else:
+                    self._tag_add_to_playlist_button.setToolTip("Alle Titel mit diesem Tag zu einer Playlist hinzufügen")
+            elif has_tag and total_count > 0:
+                self._tag_add_to_playlist_button.setToolTip("Keine Playlist verfügbar")
+            else:
+                self._tag_add_to_playlist_button.setToolTip("")
+
+        if self._tag_summary_label is not None and tag_name:
+            suffix = "Titel" if total_count == 1 else "Titel"
+            label_text = f"{tag_name} • {total_count} {suffix}"
+            if selection_count > 0:
+                select_suffix = "Titel" if selection_count == 1 else "Titel"
+                label_text += f" • Auswahl: {selection_count} {select_suffix}"
+            self._tag_summary_label.setText(label_text)
+
+        if self._tag_filter_hint_label is not None:
+            hints: List[str] = []
+            if self._tag_filter_edit is not None:
+                filter_text = self._tag_filter_edit.text().strip()
+                if filter_text:
+                    hints.append(f"Tag-Liste gefiltert nach „{filter_text}“")
+            active_tag = self._filters.get("tag")
+            if active_tag:
+                if tag_name and str(active_tag).strip().lower() == tag_name.strip().lower():
+                    hints.append("Bibliothek zeigt nur Titel mit diesem Tag")
+                else:
+                    hints.append(f"Bibliothek-Filter: „{active_tag}“")
+            self._tag_filter_hint_label.setVisible(bool(hints))
+            if hints:
+                self._tag_filter_hint_label.setText(" • ".join(hints))
+            else:
+                self._tag_filter_hint_label.clear()
+
+    def _tag_entries_for_selection(self, tag_name: str) -> Tuple[List[Tuple[Any, Path]], bool]:
+        entries = list(self._tag_entries_map.get(tag_name, []))
+        if not entries or self.tag_items_table is None:
+            return entries, False
+        selection_model = self.tag_items_table.selectionModel()
+        if selection_model is None:
+            return entries, False
+        selected_rows = sorted({model_index.row() for model_index in selection_model.selectedRows()})
+        if not selected_rows:
+            return entries, False
+        filtered: List[Tuple[Any, Path]] = []
+        for row in selected_rows:
+            if 0 <= row < len(entries):
+                filtered.append(entries[row])
+        return (filtered if filtered else entries, bool(filtered))
+
+    def _update_active_tag_label(self) -> None:
+        if self._active_tag_label is None:
+            return
+        active_tag = self._filters.get("tag")
+        if active_tag:
+            self._active_tag_label.setText(f"Aktiver Tag-Filter: {active_tag}")
+            self._active_tag_label.setVisible(True)
+        else:
+            self._active_tag_label.clear()
+            self._active_tag_label.setVisible(False)
+
+    def _on_tag_show_in_library(self) -> None:
+        tag_name = self._current_tag_name()
+        if not tag_name:
+            self.status_message.emit("Kein Tag ausgewählt.")
+            return
+
+        if self._filters.get("tag") != tag_name:
+            self._filters["tag"] = tag_name
+            self._set_custom_view()
+            self._apply_and_refresh_filters()
+
+        if self._browse_tab_widget is not None:
+            index = self.tabs.indexOf(self._browse_tab_widget)
+            if index != -1:
+                self.tabs.setCurrentIndex(index)
+
+        self._update_active_tag_label()
+        self.status_message.emit(f"Filter aktiv: Tag „{tag_name}“")
+
+    def _rename_current_tag(self) -> None:
+        tag_name = self._current_tag_name()
+        if not tag_name:
+            self.status_message.emit("Kein Tag ausgewählt.")
+            return
+
+        new_name, ok = QInputDialog.getText(self, "Tag umbenennen", "Neuer Name:", text=tag_name)
+        if not ok:
+            return
+        normalized = new_name.strip()
+        if not normalized:
+            self.status_message.emit("Tagname darf nicht leer sein.")
+            return
+        if normalized == tag_name:
+            return
+
+        entries = self._tag_entries_map.get(tag_name, [])
+        if not entries:
+            self.status_message.emit("Keine Titel für dieses Tag gefunden.")
+            return
+
+        updates: Dict[Path, List[str]] = {}
+        for media, source_path in entries:
+            abs_path = (source_path / Path(media.path)).resolve(strict=False)
+            current_tags = [normalized if t == tag_name else t for t in media.tags]
+            deduped: List[str] = []
+            for value in current_tags:
+                clean = value.strip()
+                if not clean:
+                    continue
+                if clean not in deduped:
+                    deduped.append(clean)
+            updates[abs_path] = deduped
+
+        original_filter = self._filters.get("tag")
+        filter_matches = isinstance(original_filter, str) and original_filter.strip().lower() == tag_name.lower()
+        if filter_matches:
+            self._filters["tag"] = normalized
+
+        updated = self._plugin.apply_tag_updates(updates)
+        if not updated and filter_matches:
+            self._filters["tag"] = original_filter
+
+        if updated:
+            self.status_message.emit(
+                f"Tag „{tag_name}“ in „{normalized}“ umbenannt ({updated} Titel aktualisiert)."
+            )
+            if filter_matches:
+                self._update_active_tag_label()
+        else:
+            self.status_message.emit("Keine Änderungen vorgenommen.")
+
+        self._update_tag_action_state()
+
+    def _remove_tag_from_selection(self) -> None:
+        tag_name = self._current_tag_name()
+        if not tag_name:
+            self.status_message.emit("Kein Tag ausgewählt.")
+            return
+        if self.tag_items_table is None:
+            return
+
+        entries = self._tag_entries_map.get(tag_name, [])
+        if not entries:
+            self.status_message.emit("Keine Titel für dieses Tag gefunden.")
+            return
+
+        selection_model = self.tag_items_table.selectionModel()
+        selected_rows: List[int] = []
+        if selection_model is not None:
+            selected_rows = [index.row() for index in selection_model.selectedRows()]
+
+        targets: List[tuple[MediaFile, Path]] = []
+        if selected_rows:
+            for row in selected_rows:
+                if 0 <= row < len(entries):
+                    targets.append(entries[row])
+        else:
+            confirm = QMessageBox.question(
+                self,
+                "Tag entfernen",
+                f"Tag „{tag_name}“ von allen {len(entries)} Titeln entfernen?",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                QMessageBox.StandardButton.No,
+            )
+            if confirm != QMessageBox.StandardButton.Yes:
+                return
+            targets = list(entries)
+
+        if not targets:
+            self.status_message.emit("Keine Auswahl getroffen.")
+            return
+
+        original_filter = self._filters.get("tag")
+        clear_filter = (
+            not selected_rows
+            and isinstance(original_filter, str)
+            and original_filter.strip().lower() == tag_name.lower()
+        )
+        if clear_filter:
+            self._filters["tag"] = None
+
+        updates: Dict[Path, List[str]] = {}
+        for media, source_path in targets:
+            abs_path = (source_path / Path(media.path)).resolve(strict=False)
+            remaining = [t for t in media.tags if t != tag_name]
+            updates[abs_path] = remaining
+
+        updated = self._plugin.apply_tag_updates(updates)
+        if not updated and clear_filter:
+            self._filters["tag"] = original_filter
+
+        if updated:
+            if selected_rows:
+                self.status_message.emit(
+                    f"Tag „{tag_name}“ aus {updated} ausgewählten Titeln entfernt."
+                )
+            else:
+                self.status_message.emit(
+                    f"Tag „{tag_name}“ vollständig entfernt ({updated} Titel aktualisiert)."
+                )
+            if clear_filter:
+                self._update_active_tag_label()
+        else:
+            self.status_message.emit("Keine Änderungen vorgenommen.")
+
+        self._update_tag_action_state()
+
+    def _create_playlist_from_tag(self) -> None:
+        tag_name = self._current_tag_name()
+        if not tag_name:
+            self.status_message.emit("Kein Tag ausgewählt.")
+            return
+        entries, from_selection = self._tag_entries_for_selection(tag_name)
+        if not entries:
+            self.status_message.emit("Keine Titel für dieses Tag gefunden.")
+            return
+        if not hasattr(self._plugin, "create_playlist"):
+            self.status_message.emit("Playlists werden nicht unterstützt.")
+            return
+
+        suggested = tag_name.strip() or "Neue Playlist"
+        name, accepted = QInputDialog.getText(self, "Playlist aus Tag", "Name der Playlist:", text=suggested)
+        if not accepted:
+            return
+        cleaned = name.strip()
+        if not cleaned:
+            self.status_message.emit("Playlist-Name darf nicht leer sein.")
+            return
+
+        playlist_id = self._plugin.create_playlist(cleaned)
+        if playlist_id is None:
+            self.status_message.emit("Playlist konnte nicht erstellt werden (Name möglicherweise bereits vorhanden).")
+            return
+
+        paths = [
+            (source_path / Path(media.path)).resolve(strict=False)
+            for media, source_path in entries
+        ]
+        added, skipped = self._add_paths_to_playlist(playlist_id, paths)
+
+        parts: List[str] = []
+        if added:
+            parts.append(f"{added} Titel übernommen")
+        if skipped:
+            parts.append(f"{skipped} Duplikate übersprungen")
+        if not parts:
+            parts.append("Keine neuen Titel übernommen")
+
+        scope = "aus Auswahl" if from_selection else "aus Tag"
+        self.status_message.emit(f"Playlist „{cleaned}“ erstellt ({scope}; {', '.join(parts)}).")
+        self._refresh_playlists(select_id=playlist_id)
+
+    def _on_tag_add_to_playlist(self) -> None:
+        tag_name = self._current_tag_name()
+        if not tag_name:
+            self.status_message.emit("Kein Tag ausgewählt.")
+            return
+        entries, from_selection = self._tag_entries_for_selection(tag_name)
+        if not entries:
+            self.status_message.emit("Keine Titel für dieses Tag gefunden.")
+            return
+        if not hasattr(self._plugin, "add_to_playlist"):
+            self.status_message.emit("Playlists werden nicht unterstützt.")
+            return
+
+        if not self._playlists_cache:
+            self.status_message.emit("Keine Playlists vorhanden. Neue Playlist wird erstellt.")
+            self._create_playlist_from_tag()
+            return
+
+        create_choice = "Neue Playlist…"
+        choices = [entry["name"] for entry in self._playlists_cache]
+        choices.append(create_choice)
+        selection, accepted = QInputDialog.getItem(
+            self,
+            "Playlist auswählen",
+            "Playlist:",
+            choices,
+            0,
+            False,
+        )
+        if not accepted:
+            return
+        if selection == create_choice:
+            self._create_playlist_from_tag()
+            return
+
+        target_entry = next((entry for entry in self._playlists_cache if entry["name"] == selection), None)
+        if target_entry is None:
+            self.status_message.emit("Playlist nicht gefunden.")
+            return
+
+        playlist_id = int(target_entry["id"])
+        paths = [
+            (source_path / Path(media.path)).resolve(strict=False)
+            for media, source_path in entries
+        ]
+        added, skipped = self._add_paths_to_playlist(playlist_id, paths)
+
+        parts: List[str] = []
+        if added:
+            parts.append(f"{added} hinzugefügt")
+        if skipped:
+            parts.append(f"{skipped} Duplikate")
+        if not parts:
+            parts.append("Keine neuen Titel")
+
+        scope = "Auswahl" if from_selection else "gesamter Tag"
+        self.status_message.emit(
+            f"Tag „{tag_name}“ ({scope}) → Playlist „{selection}“: {', '.join(parts)}."
+        )
+        self._refresh_playlists(select_id=playlist_id)
+
+    def _on_tag_item_double_clicked(self, item: QTableWidgetItem) -> None:
+        if item is None:
+            return
+        path_value = item.data(self.PATH_ROLE)
+        if not isinstance(path_value, str):
+            return
+        if path_value in self._entry_lookup:
+            if self._browse_tab_widget is not None:
+                index = self.tabs.indexOf(self._browse_tab_widget)
+                if index != -1:
+                    self.tabs.setCurrentIndex(index)
+            self._set_current_path(path_value)
+        else:
+            self.status_message.emit("Titel ist aktuell nicht in der Liste sichtbar. Filter anpassen?")
 
     def _on_status_message(self, message: str) -> None:
         self.status.setText(message)
@@ -2829,14 +3982,28 @@ class MediaLibraryPlugin(BasePlugin):
                 )
                 self._widget.library_changed.emit()
 
+    def apply_tag_updates(self, updates: Dict[Path, List[str]], status_message: Optional[str] = None) -> int:
+        cleaned: Dict[Path, List[str]] = {}
+        for raw_path, tags in updates.items():
+            path_obj = Path(raw_path)
+            normalized = [str(tag).strip() for tag in tags if tag and str(tag).strip()]
+            cleaned[path_obj] = normalized
+
+        updated = 0
+        for path_obj, tag_values in cleaned.items():
+            if self._index.set_tags(path_obj, tag_values):
+                updated += 1
+                if self._widget:
+                    self._widget.evict_metadata_cache(path_obj)
+
+        if updated and self._widget:
+            if status_message:
+                self._widget.status_message.emit(status_message)
+            self._widget.library_changed.emit()
+        return updated
+
     def set_tags(self, path: Path, tags: Iterable[str]) -> None:
-        if self._index.set_tags(path, tags):
-            if self._widget:
-                self._widget.evict_metadata_cache(path)
-                self._widget.status_message.emit(
-                    "Tags aktualisiert: {}".format(path.name)
-                )
-                self._widget.library_changed.emit()
+        self.apply_tag_updates({path: list(tags)}, f"Tags aktualisiert: {path.name}")
 
     def get_file_attributes(self, path: Path) -> Tuple[Optional[int], Tuple[str, ...]]:
         return self._index.get_attributes(path)
@@ -2877,6 +4044,10 @@ class MediaLibraryPlugin(BasePlugin):
 
     def remove_from_playlist(self, playlist_id: int, file_path: Path) -> bool:
         return self._index.remove_from_playlist(int(playlist_id), file_path)
+
+    def reorder_playlist_items(self, playlist_id: int, paths: Iterable[Path]) -> bool:
+        ordered = [Path(path) if not isinstance(path, Path) else path for path in paths]
+        return self._index.reorder_playlist_items(int(playlist_id), ordered)
 
     def load_custom_presets(self) -> Dict[str, Dict[str, Any]]:
         raw = self.config.get("custom_presets", {})

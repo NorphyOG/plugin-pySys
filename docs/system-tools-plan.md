@@ -128,6 +128,10 @@ Das MMST soll eine plattformübergreifende (Windows & Linux) Python-Anwendung we
   - [x] Integrierter Audio/Video-Player in der Detailansicht (QtMultimedia, optionaler Fallback).
   - [x] Playlist-Datenbank (Schema, CRUD) und Playlist-Tab mit Hinzufügen/Entfernen.
   - [x] Kino-Modus (Fullscreen) mit dynamischem Video-Wechsel & Autoplay.
+  - [x] Tag-Übersichtstab mit Filter, Detailtabelle und Schnellnavigation.
+  - [x] Verbesserte Tag-Interaktionen: Bibliotheksfilter per Klick, Umbenennen/Entfernen und dynamische Hinweise.
+  - [x] Manuelles Playlist-Reordering (Auf/Ab) und Tag → Playlist-Workflows (Playlist aus Tag, Tag zu Playlist).
+  - [x] Linux-optimierte "Im Ordner anzeigen"-Funktion via `xdg-open` Fallback.
 
 - **Iteration 6 Fokus (Entwurf)**
   - [ ] Smart Playlists & regelbasierte Vorschläge vorbereiten.

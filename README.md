@@ -7,7 +7,7 @@ Der Core verwaltet Lebenszyklus, Benutzeroberfläche und gemeinsame Dienste, wä
 ## Highlights (Oktober 2025)
 
 - **Sitzungspersistenz:** Dashboard merkt sich Fenstergröße, aktives Plugin und zuletzt genutzte MediaLibrary-Filter inklusive Tabs & Auswahl.
-- **MediaLibrary Iteration 5:** Inline-Bewertungen und Tags, benutzerdefinierte Presets, Stapelaktionen und externe Player pro Dateityp.
+- **MediaLibrary Iteration 5:** Inline-Bewertungen und Tags, benutzerdefinierte Presets, Stapelaktionen, externe Player pro Dateityp sowie Auswahl-basierte Tag-/Playlist-Aktionen und eine integrierte Playlist-Wiedergabe.
 - **Qualitätssicherung:** Erweiterte Tests für UI-Persistenz und Attributspeicherung sichern die neuen Workflows ab.
 
 ## Architektur im Überblick
@@ -28,7 +28,7 @@ Der Core verwaltet Lebenszyklus, Benutzeroberfläche und gemeinsame Dienste, wä
 | ------ | ------------- | ------ |
 | `FileManagerPlugin` (`mmst.file_manager`) | Duplikat-Scanner mit Hash-Gruppierung, sicherer Löschfunktion und dateibasierten Backups mit Fortschrittsanzeige | ✅ MVP |
 | `AudioToolsPlugin` (`mmst.audio_tools`) | Echtzeit-10-Band-Equalizer mit scipy DSP, WAV-Recorder mit Metadaten, Preset-Verwaltung | ✅ MVP |
-| `MediaLibraryPlugin` (`mmst.media_library`) | SQLite-Bibliothek mit Quellenverwaltung, Inline-Rating & Tags, benutzerdefinierten Presets, Stapelaktionen, externen Playern sowie persistenten Filtern, Tabs und Selektionen | ✅ Iteration 5 |
+| `MediaLibraryPlugin` (`mmst.media_library`) | SQLite-Bibliothek mit Quellenverwaltung, Inline-Rating & Tags, benutzerdefinierten Presets, Stapelaktionen, externen Playern, Playlist-Wiedergabe sowie persistenten Filtern, Tabs und Selektionen | ✅ Iteration 5 |
 | `SystemToolsPlugin` (`mmst.system_tools`) | Dateikonverter für Audio/Video/Bild mit ffmpeg/ImageMagick-Integration und Tool-Erkennung | ✅ MVP |
 
 Der Duplikat-Scanner nutzt parallele Threads, gruppiert Dateien anhand von SHA-256-Hashes und erlaubt das Löschen

@@ -244,6 +244,11 @@ class TagEditor(QWidget):
         self._refresh()
         self.tagsChanged.emit(self.tags())
 
+    def commit_pending_input(self) -> None:
+        """Ensure the current line edit contents are turned into tags."""
+        if self._input.text().strip():
+            self._commit_input()
+
     def setEnabled(self, enabled: bool) -> None:  # pragma: no cover - Qt base override
         super().setEnabled(enabled)
         self._input.setEnabled(enabled)
@@ -327,4 +332,5 @@ class BatchMetadataDialog(QDialog):
     def selected_tags(self) -> List[str] | None:
         if not self._tags_checkbox.isChecked():
             return None
+        self._tag_editor.commit_pending_input()
         return self._tag_editor.tags()
