@@ -1,0 +1,49 @@
+[
+  {
+    "name": "Hoch bewertete Audio",
+    "limit": null,
+    "sort": "rating_desc",
+    "description": ">=4 Sterne & Audio",
+    "match": "all",
+    "rules": [
+      {
+        "field": "rating",
+        "op": ">=",
+        "value": 4
+      },
+      {
+        "field": "kind",
+        "op": "==",
+        "value": "audio"
+      }
+    ]
+  },
+  {
+    "name": "Neue Videos",
+    "limit": 500,
+    "sort": "mtime_desc",
+    "description": "Zuletzt geänderte Videos",
+    "match": "all",
+    "rules": [
+      {
+        "field": "kind",
+        "op": "==",
+        "value": "video"
+      }
+    ]
+  },
+  {
+    "name": "Lange Tracks",
+    "limit": null,
+    "sort": "duration_desc",
+    "description": "> 10 Minuten",
+    "match": "all",
+    "rules": [
+      {
+        "field": "duration",
+        "op": ">",
+        "value": 600
+      }
+    ]
+  }
+]

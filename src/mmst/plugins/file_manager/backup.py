@@ -20,11 +20,13 @@ class BackupResult:
 ProgressCallback = Callable[[str], None]
 
 
-def perform_backup(source: Path, target: Path, mirror: bool, progress: ProgressCallback) -> BackupResult:
+def perform_backup(source: Path, target: Path, mirror: bool, progress: ProgressCallback, dry_run: bool = False) -> BackupResult:
     """Copy ``source`` into ``target`` while preserving directory structure.
 
     The implementation performs an incremental copy and optionally mirrors the target by
     deleting files or directories that no longer exist in the source tree.
+    
+    If dry_run is True, simulates the backup without actually copying or deleting files.
     """
 
     if not source.exists() or not source.is_dir():
@@ -63,15 +65,22 @@ def perform_backup(source: Path, target: Path, mirror: bool, progress: ProgressC
                         skipped += 1
                         progress(f"Übersprungen: {dst_file} (unverändert)")
                         continue
-                shutil.copy2(src_file, dst_file)
-                copied += 1
-                total_bytes += dst_file.stat().st_size
-                progress(f"Kopiert: {dst_file}")
+                
+                if dry_run:
+                    # Simulation: count as copied but don't actually copy
+                    copied += 1
+                    total_bytes += src_file.stat().st_size
+                    progress(f"[DRY RUN] Würde kopieren: {dst_file}")
+                else:
+                    shutil.copy2(src_file, dst_file)
+                    copied += 1
+                    total_bytes += dst_file.stat().st_size
+                    progress(f"Kopiert: {dst_file}")
             except Exception as exc:  # pragma: no cover - runtime failure surface
                 progress(f"Fehler beim Kopieren von {src_file}: {exc}")
 
     if mirror:
-        removed += _mirror_cleanup(source, target, progress)
+        removed += _mirror_cleanup(source, target, progress, dry_run)
 
     duration = time.time() - start_time
     return BackupResult(
@@ -83,7 +92,7 @@ def perform_backup(source: Path, target: Path, mirror: bool, progress: ProgressC
     )
 
 
-def _mirror_cleanup(source: Path, target: Path, progress: ProgressCallback) -> int:
+def _mirror_cleanup(source: Path, target: Path, progress: ProgressCallback, dry_run: bool = False) -> int:
     removed = 0
     for root, dirs, files in os.walk(target, topdown=False):
         root_path = Path(root)
@@ -94,9 +103,13 @@ def _mirror_cleanup(source: Path, target: Path, progress: ProgressCallback) -> i
             target_file = root_path / filename
             if not (source_root / filename).exists():
                 try:
-                    target_file.unlink()
-                    removed += 1
-                    progress(f"Gelöscht: {target_file}")
+                    if dry_run:
+                        removed += 1
+                        progress(f"[DRY RUN] Würde löschen: {target_file}")
+                    else:
+                        target_file.unlink()
+                        removed += 1
+                        progress(f"Gelöscht: {target_file}")
                 except Exception as exc:  # pragma: no cover - runtime failure surface
                     progress(f"Fehler beim Löschen von {target_file}: {exc}")
 
@@ -104,9 +117,13 @@ def _mirror_cleanup(source: Path, target: Path, progress: ProgressCallback) -> i
             target_dir = root_path / directory
             if not (source_root / directory).exists():
                 try:
-                    shutil.rmtree(target_dir)
-                    removed += 1
-                    progress(f"Verzeichnis entfernt: {target_dir}")
+                    if dry_run:
+                        removed += 1
+                        progress(f"[DRY RUN] Würde entfernen: {target_dir}")
+                    else:
+                        shutil.rmtree(target_dir)
+                        removed += 1
+                        progress(f"Verzeichnis entfernt: {target_dir}")
                 except Exception as exc:  # pragma: no cover - runtime failure surface
                     progress(f"Fehler beim Entfernen von {target_dir}: {exc}")
 

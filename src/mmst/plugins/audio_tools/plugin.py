@@ -162,6 +162,18 @@ class EqualizerPanel(QWidget):
         engine_layout.addWidget(self.eq_status_label)
         engine_layout.addStretch(1)
         layout.addWidget(engine_box)
+        
+        # Spectrum Analyzer
+        try:
+            from .spectrum_analyzer import SpectrumAnalyzerWidget
+            spectrum_box = QGroupBox("Spektrum-Analyzer")
+            spectrum_layout = QVBoxLayout(spectrum_box)
+            self.spectrum_analyzer = SpectrumAnalyzerWidget()
+            spectrum_layout.addWidget(self.spectrum_analyzer)
+            layout.addWidget(spectrum_box)
+        except Exception:
+            # Spectrum analyzer not available (missing numpy/sounddevice)
+            self.spectrum_analyzer = None  # type: ignore[assignment]
 
         sliders_box = QGroupBox("10-Band Equalizer")
         sliders_layout = QHBoxLayout(sliders_box)
@@ -400,10 +412,20 @@ class EqualizerPanel(QWidget):
                 self._plugin.start_eq_engine(self._bus, device_id, values)
                 self.eq_status_label.setText("● Aktiv")
                 self.eq_status_label.setStyleSheet("color: #0f0;")
+                
+                # Start spectrum analyzer
+                if hasattr(self, 'spectrum_analyzer') and self.spectrum_analyzer:
+                    # Get device index for analyzer
+                    device_idx = self._plugin.get_device_index_for_id(self._bus, device_id)
+                    self.spectrum_analyzer.start(device_idx)
             else:
                 self._plugin.stop_eq_engine(self._bus, device_id)
                 self.eq_status_label.setText("● Inaktiv")
                 self.eq_status_label.setStyleSheet("color: #888;")
+                
+                # Stop spectrum analyzer
+                if hasattr(self, 'spectrum_analyzer') and self.spectrum_analyzer:
+                    self.spectrum_analyzer.stop()
         except Exception as exc:
             QMessageBox.warning(self, "EQ Engine Fehler", str(exc))
             self.enable_eq_checkbox.setChecked(False)
@@ -709,6 +731,10 @@ class RecorderPanel(QWidget):
         self._loading = False
         self._current_mode = "input"
         self._visualizer_key: Optional[Tuple[str, str, int, int]] = None
+        self._timer_enabled = False
+        self._timer_duration_seconds = 300  # 5 minutes default
+        self._recording_start_time: Optional[float] = None
+        self._timer_update_timer: Optional[QTimer] = None
 
         layout = QVBoxLayout(self)
         layout.setSpacing(8)
@@ -750,6 +776,51 @@ class RecorderPanel(QWidget):
         output_layout.addRow("Zielordner", container)
         layout.addWidget(output_box)
 
+        # Timer controls
+        timer_box = QGroupBox("⏱️ Aufnahme-Timer (Optional)")
+        timer_layout = QVBoxLayout(timer_box)
+        
+        self.timer_enable_check = QCheckBox("Timer aktivieren")
+        self.timer_enable_check.stateChanged.connect(self._on_timer_enable_changed)
+        timer_layout.addWidget(self.timer_enable_check)
+        
+        timer_settings_layout = QHBoxLayout()
+        timer_settings_layout.addWidget(QLabel("Max. Dauer:"))
+        
+        self.timer_duration_spin = QSpinBox()
+        self.timer_duration_spin.setMinimum(1)
+        self.timer_duration_spin.setMaximum(600)  # 10 hours
+        self.timer_duration_spin.setValue(5)
+        self.timer_duration_spin.setSuffix(" Minuten")
+        self.timer_duration_spin.valueChanged.connect(self._on_timer_duration_changed)
+        timer_settings_layout.addWidget(self.timer_duration_spin)
+        
+        # Quick preset buttons
+        self.timer_preset_5min = QPushButton("5min")
+        self.timer_preset_5min.clicked.connect(lambda: self.timer_duration_spin.setValue(5))
+        timer_settings_layout.addWidget(self.timer_preset_5min)
+        
+        self.timer_preset_15min = QPushButton("15min")
+        self.timer_preset_15min.clicked.connect(lambda: self.timer_duration_spin.setValue(15))
+        timer_settings_layout.addWidget(self.timer_preset_15min)
+        
+        self.timer_preset_30min = QPushButton("30min")
+        self.timer_preset_30min.clicked.connect(lambda: self.timer_duration_spin.setValue(30))
+        timer_settings_layout.addWidget(self.timer_preset_30min)
+        
+        self.timer_preset_60min = QPushButton("60min")
+        self.timer_preset_60min.clicked.connect(lambda: self.timer_duration_spin.setValue(60))
+        timer_settings_layout.addWidget(self.timer_preset_60min)
+        
+        timer_settings_layout.addStretch()
+        timer_layout.addLayout(timer_settings_layout)
+        
+        self.timer_status_label = QLabel("Timer nicht aktiv")
+        self.timer_status_label.setStyleSheet("color: #888; font-weight: bold;")
+        timer_layout.addWidget(self.timer_status_label)
+        
+        layout.addWidget(timer_box)
+
         control_row = QHBoxLayout()
         self.record_button = QPushButton("Aufnahme starten")
         self.stop_button = QPushButton("Stop")
@@ -788,6 +859,11 @@ class RecorderPanel(QWidget):
 
         self.status_label = QLabel("Keine Aufnahmen.")
         layout.addWidget(self.status_label)
+        
+        # Setup timer update mechanism
+        self._timer_update_timer = QTimer(self)
+        self._timer_update_timer.timeout.connect(self._update_timer_display)
+        self._timer_update_timer.setInterval(500)  # Update twice per second
 
     def refresh(self) -> None:
         self._loading = True
@@ -958,11 +1034,28 @@ class RecorderPanel(QWidget):
         except Exception as exc:  # pragma: no cover - defensive UI feedback
             QMessageBox.critical(self, "Unerwarteter Fehler", str(exc))
             return
+        
+        # Start timer tracking if enabled
+        if self._timer_enabled:
+            import time
+            self._recording_start_time = time.time()
+            if self._timer_update_timer:
+                self._timer_update_timer.start()
+            self._plugin._logger.info("⏱️ Timer-basierte Aufnahme gestartet: %d Minuten", self._timer_duration_seconds // 60)
+        else:
+            self._recording_start_time = None
+        
         self._update_controls()
 
     def _stop_recording(self) -> None:
         if not self._plugin.is_recording():
             return
+        
+        # Stop timer tracking
+        if self._timer_update_timer:
+            self._timer_update_timer.stop()
+        self._recording_start_time = None
+        
         try:
             entry = self._plugin.stop_recording()
         except RecordingError as exc:
@@ -1017,9 +1110,77 @@ class RecorderPanel(QWidget):
             return
         self._visualizer_key = key
 
+    def _on_timer_enable_changed(self, state: int) -> None:
+        """Handle timer enable checkbox state change."""
+        self._timer_enabled = state == Qt.CheckState.Checked.value
+        self.timer_duration_spin.setEnabled(self._timer_enabled)
+        self.timer_preset_5min.setEnabled(self._timer_enabled)
+        self.timer_preset_15min.setEnabled(self._timer_enabled)
+        self.timer_preset_30min.setEnabled(self._timer_enabled)
+        self.timer_preset_60min.setEnabled(self._timer_enabled)
+        
+        if not self._timer_enabled:
+            self.timer_status_label.setText("Timer nicht aktiv")
+            self.timer_status_label.setStyleSheet("color: #888; font-weight: bold;")
+        else:
+            minutes = self._timer_duration_seconds // 60
+            self.timer_status_label.setText(f"Timer aktiviert: {minutes} Minuten")
+            self.timer_status_label.setStyleSheet("color: #4CAF50; font-weight: bold;")
+    
+    def _on_timer_duration_changed(self, minutes: int) -> None:
+        """Handle timer duration spinbox value change."""
+        self._timer_duration_seconds = minutes * 60
+        if self._timer_enabled and not self._plugin.is_recording():
+            self.timer_status_label.setText(f"Timer aktiviert: {minutes} Minuten")
+    
+    def _update_timer_display(self) -> None:
+        """Update timer countdown display during recording."""
+        if not self._plugin.is_recording() or self._recording_start_time is None:
+            if self._timer_update_timer:
+                self._timer_update_timer.stop()
+            return
+        
+        import time
+        elapsed = time.time() - self._recording_start_time
+        remaining = self._timer_duration_seconds - elapsed
+        
+        if remaining <= 0:
+            # Timer expired - auto stop
+            self._plugin._logger.info("✅ Timer abgelaufen - Aufnahme wird automatisch gestoppt")
+            self.timer_status_label.setText("⏱️ Timer abgelaufen - Stoppe Aufnahme...")
+            self.timer_status_label.setStyleSheet("color: #FF9800; font-weight: bold;")
+            self._stop_recording()
+            return
+        
+        # Update countdown display
+        remaining_minutes = int(remaining // 60)
+        remaining_seconds = int(remaining % 60)
+        elapsed_str = _format_duration(elapsed)
+        
+        if remaining <= 60:
+            # Last minute - show in red
+            self.timer_status_label.setText(
+                f"⏱️ Noch {remaining_seconds}s | Aufnahme: {elapsed_str}"
+            )
+            self.timer_status_label.setStyleSheet("color: #F44336; font-weight: bold;")
+        elif remaining <= 300:
+            # Last 5 minutes - show in orange
+            self.timer_status_label.setText(
+                f"⏱️ Noch {remaining_minutes}:{remaining_seconds:02d} | Aufnahme: {elapsed_str}"
+            )
+            self.timer_status_label.setStyleSheet("color: #FF9800; font-weight: bold;")
+        else:
+            # Normal - show in green
+            self.timer_status_label.setText(
+                f"⏱️ Noch {remaining_minutes}:{remaining_seconds:02d} | Aufnahme: {elapsed_str}"
+            )
+            self.timer_status_label.setStyleSheet("color: #4CAF50; font-weight: bold;")
+
     def closeEvent(self, event) -> None:  # type: ignore[override]
         if hasattr(self, "visualizer"):
             self.visualizer.stop()
+        if hasattr(self, "_timer_update_timer") and self._timer_update_timer:
+            self._timer_update_timer.stop()
         super().closeEvent(event)
 
 
@@ -1181,6 +1342,26 @@ class AudioToolsPlugin(BasePlugin):
         bus_state = self._ensure_bus(bus)
         bus_state["selected_device"] = device_id
         self._persist_eq_state()
+    
+    def get_device_index_for_id(self, bus: str, device_id: str) -> Optional[int]:
+        """Get the numeric device index for a device identifier."""
+        # Device identifier format is typically "device:<index>" or similar
+        # For sounddevice, we need to extract the numeric index
+        try:
+            # Try to parse as integer directly
+            return int(device_id)
+        except (ValueError, TypeError):
+            pass
+        
+        # Try to extract from "device:<index>" format
+        if ":" in device_id:
+            try:
+                return int(device_id.split(":")[-1])
+            except (ValueError, TypeError):
+                pass
+        
+        # Default to None if unable to parse
+        return None
 
     def get_device_state(self, bus: str, device_id: str) -> Dict[str, Any]:
         device_state = deepcopy(self._ensure_device(bus, device_id))

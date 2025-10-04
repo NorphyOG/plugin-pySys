@@ -8,6 +8,8 @@ from typing import Any, Callable, Dict, Iterable, List, Optional
 
 from .config import ConfigStore, PluginConfig
 from .audio import AudioDeviceService
+from .events import EventBus
+from .progress import ProgressTracker
 
 
 class NotificationCenter:
@@ -57,6 +59,8 @@ class CoreServices:
         self.notifications = NotificationCenter()
         self._config_store = ConfigStore(self.data_dir / "config.json")
         self.audio_devices = AudioDeviceService(self.get_logger("AudioDeviceService"))
+        self.event_bus = EventBus()
+        self.progress = ProgressTracker()
 
     @staticmethod
     def _resolve_data_dir(app_name: str) -> Path:

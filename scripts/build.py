@@ -19,12 +19,14 @@ Usage examples:
 from __future__ import annotations
 
 import argparse
+import os
 import platform
 import shutil
 import stat
 import subprocess
 import sys
 import textwrap
+import time
 import venv
 from pathlib import Path
 from typing import Iterable, List, Optional
@@ -36,13 +38,16 @@ class StepError(RuntimeError):
     """Raised when one of the build steps fails."""
 
 
-def run_command(command: Iterable[str | Path], *, cwd: Path | None = None) -> None:
+def run_command(
+    command: Iterable[str | Path], *, cwd: Path | None = None, env: Optional[dict[str, str]] = None
+) -> None:
     """Execute a command and raise a helpful error message on failure."""
 
     cmd_list: List[str] = [str(part) for part in command]
     display = " ".join(cmd_list)
     print(f"\n>> {display}")
-    result = subprocess.run(cmd_list, cwd=str(cwd or PROJECT_ROOT))
+    run_env = env if env is not None else None
+    result = subprocess.run(cmd_list, cwd=str(cwd or PROJECT_ROOT), env=run_env)
     if result.returncode != 0:
         raise StepError(f"Command failed with exit code {result.returncode}: {display}")
 
@@ -78,6 +83,38 @@ def build_distributions(out_dir: Path | None = None) -> None:
         out_dir.mkdir(parents=True, exist_ok=True)
         command.extend(["--outdir", str(out_dir)])
     run_command(command)
+
+
+def _handle_remove_readonly(func, path, exc_info) -> None:
+    del exc_info  # unused
+    try:
+        os.chmod(path, stat.S_IWRITE)
+    except OSError:
+        pass
+    func(path)
+
+
+def robust_rmtree(path: Path, *, attempts: int = 6, delay: float = 0.6) -> None:
+    """Remove a directory tree with retries to handle Windows file locking."""
+
+    if not path.exists():
+        return
+
+    last_error: Optional[BaseException] = None
+    for attempt in range(1, max(1, attempts) + 1):
+        try:
+            shutil.rmtree(path, onerror=_handle_remove_readonly)
+            return
+        except Exception as error:  # pragma: no cover - platform specific
+            last_error = error
+            time.sleep(delay * attempt)
+    if os.name == "nt":  # pragma: no cover - Windows only
+        try:
+            subprocess.run(["cmd", "/c", "rmdir", "/s", "/q", str(path)], check=True)
+            return
+        except subprocess.CalledProcessError as error:
+            last_error = error
+    raise StepError(f"Unable to remove directory {path}: {last_error}")
 
 
 def portable_platform_slug() -> str:
@@ -200,7 +237,16 @@ def build_portable_bundle(
     builder.create(env_dir)
 
     python_exe = portable_python_executable(env_dir)
-    run_command([python_exe, "-m", "pip", "install", "--no-cache-dir", str(PROJECT_ROOT)])
+    pip_env: dict[str, str] = dict(os.environ)
+    pip_env.setdefault("PIP_DISABLE_PIP_VERSION_CHECK", "1")
+    pip_env.setdefault("PIP_DEFAULT_TIMEOUT", "60")
+    pip_env.setdefault("PIP_RETRIES", "5")
+
+    run_command([python_exe, "-m", "pip", "install", "--upgrade", "pip", "setuptools", "wheel"], env=pip_env)
+    run_command(
+        [python_exe, "-m", "pip", "install", "--no-cache-dir", "--prefer-binary", str(PROJECT_ROOT)],
+        env=pip_env,
+    )
 
     create_portable_launchers(env_dir)
     write_portable_readme(env_dir, slug)
@@ -215,7 +261,8 @@ def build_portable_bundle(
     )
 
     if not keep_env:
-        shutil.rmtree(env_dir)
+        time.sleep(0.5)
+        robust_rmtree(env_dir)
 
     return archive_path
 

@@ -28,9 +28,13 @@ src/mmst/plugins/media_library/core.py
 src/mmst/plugins/media_library/covers.py
 src/mmst/plugins/media_library/editor.py
 src/mmst/plugins/media_library/metadata.py
+src/mmst/plugins/media_library/models.py
 src/mmst/plugins/media_library/plugin.py
+src/mmst/plugins/media_library/stats.py
 src/mmst/plugins/media_library/ui_helpers.py
 src/mmst/plugins/media_library/watcher.py
+src/mmst/plugins/media_library/smart/__init__.py
+src/mmst/plugins/media_library/smart/model.py
 src/mmst/plugins/system_tools/__init__.py
 src/mmst/plugins/system_tools/converter.py
 src/mmst/plugins/system_tools/plugin.py
@@ -46,7 +50,9 @@ tests/test_duplicate_scanner.py
 tests/test_equalizer.py
 tests/test_library_index_attributes.py
 tests/test_library_index_playlist.py
+tests/test_library_stats.py
 tests/test_media_library.py
+tests/test_media_library_dynamic_visibility.py
 tests/test_media_library_widget.py
 tests/test_metadata.py
 tests/test_plugin_manager.py

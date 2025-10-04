@@ -115,6 +115,18 @@ class DashboardWindow(QMainWindow):
         actions_layout.addWidget(self.configure_button)
 
         sidebar_layout.addLayout(actions_layout)
+        
+        # Progress dialog button
+        progress_button_layout = QHBoxLayout()
+        self.progress_button = QPushButton("📊 Fortschritt anzeigen")
+        self.progress_button.clicked.connect(self._toggle_progress_dialog)
+        progress_button_layout.addWidget(self.progress_button)
+        sidebar_layout.addLayout(progress_button_layout)
+        
+        # Settings button (for debug console)
+        settings_button = QPushButton("⚙️ Einstellungen")
+        settings_button.clicked.connect(self._show_settings)
+        sidebar_layout.addWidget(settings_button)
 
         self.status_label = QLabel("Bereit")
         self.status_label.setAlignment(Qt.AlignLeft | Qt.AlignVCenter)  # type: ignore[attr-defined]
@@ -133,6 +145,18 @@ class DashboardWindow(QMainWindow):
         self.setCentralWidget(container)
 
         self._services.notifications.subscribe(self._on_notification)
+        
+        # Initialize progress dialog
+        from .progress import ProgressDialog
+        self._progress_dialog = ProgressDialog(self)
+        self._services.progress.set_dialog(self._progress_dialog)
+        
+        # Initialize debug console and attach to root logger immediately
+        from .debug_console import DebugConsole
+        import logging
+        self._debug_console = DebugConsole()
+        self._debug_console.attach_to_logger(logging.getLogger())  # Attach to root logger
+        self._settings_dialog: Optional[QWidget] = None
 
         self._restore_window_settings()
 
@@ -346,6 +370,11 @@ class DashboardWindow(QMainWindow):
     def _configure_selected(self) -> None:
         record = self._current_record()
         if not record or record.instance is None:
+            QMessageBox.warning(
+                self,
+                "Plugin nicht geladen",
+                "Das Plugin muss erst gestartet werden, bevor es konfiguriert werden kann.",
+            )
             return
         try:
             record.instance.configure(self)
@@ -357,7 +386,54 @@ class DashboardWindow(QMainWindow):
             )
         except Exception as exc:  # pragma: no cover - UI feedback only
             self._services.logger.exception("Config dialog failed for plugin %s", record.manifest.identifier)
-            QMessageBox.critical(self, "Fehler", str(exc))
+            QMessageBox.critical(self, "Fehler", f"Konfigurationsfehler: {exc}")
+    
+    def _toggle_progress_dialog(self) -> None:
+        """Show or hide progress dialog."""
+        if self._progress_dialog.isVisible():
+            self._progress_dialog.hide()
+            self.progress_button.setText("📊 Fortschritt anzeigen")
+        else:
+            self._progress_dialog.show()
+            self._progress_dialog.raise_()
+            self._progress_dialog.activateWindow()
+            self.progress_button.setText("📊 Fortschritt ausblenden")
+    
+    def _show_settings(self) -> None:
+        """Show settings dialog with debug console."""
+        if self._settings_dialog and self._settings_dialog.isVisible():
+            self._settings_dialog.raise_()
+            self._settings_dialog.activateWindow()
+            return
+        
+        # Create settings dialog
+        from PySide6.QtWidgets import QDialog, QTabWidget
+        
+        dialog = QDialog(self)
+        dialog.setWindowTitle("MMST Einstellungen")
+        dialog.setMinimumSize(800, 600)
+        
+        layout = QVBoxLayout(dialog)
+        
+        tabs = QTabWidget()
+        
+        # Debug Console tab (already initialized and attached in __init__)
+        tabs.addTab(self._debug_console, "🐛 Debug-Console")
+        
+        # Future: Add more settings tabs here
+        # tabs.addTab(general_settings, "⚙️ Allgemein")
+        # tabs.addTab(appearance_settings, "🎨 Darstellung")
+        
+        layout.addWidget(tabs)
+        
+        # Close button
+        from PySide6.QtWidgets import QDialogButtonBox
+        button_box = QDialogButtonBox(QDialogButtonBox.StandardButton.Close)
+        button_box.rejected.connect(dialog.close)
+        layout.addWidget(button_box)
+        
+        self._settings_dialog = dialog
+        dialog.show()
 
     def _refresh_record(self, identifier: str) -> None:
         record = self._manager.get(identifier)

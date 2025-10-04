@@ -1,7 +1,11 @@
 # Projektplan: Modulares Medien- & System-Toolkit (MMST)
 
 **Version: 3.0**
-**Letzte Aktualisierung: 2025-10-03**
+**Letzte Ak- **Feature: Duplikat-Scanner**
+  - [x] UI, Backend, Threading, Anzeige und Löschfunktion implementiert.
+  - [x] „Im Ordner anzeigen"-Button.
+  - [ ] **(Neu)** Alternative Scan-Methoden: Zusätzliche Optionen zum Finden von Duplikaten anbieten (z.B. nur Dateiname, Metadaten-Ähnlichkeit für Audiofiles).
+  - [x] **(Abgeschlossen)** Intelligente Auswahl: 4 Smart-Selection-Buttons implementiert (Älteste behalten, Kleinste behalten, Nach Ordner filtern, Alle abwählen).sierung: 2025-10-03**
 
 ## 1. Vision & Ziele
 
@@ -38,8 +42,9 @@ Das MMST soll eine plattformübergreifende (Windows & Linux) Python-Anwendung we
     - [x] Implementierung des `SystemTools` Plugins mit Dateikonverter (MVP).
     - [ ] **(Als Nächstes)** Disk Integrity Monitor und erweiterte Features.
 
-5. **(Neu) Advanced Integrations & Automation (Geplant):**
-    - [ ] Plugin-übergreifende Aktionen und Workflows.
+5. **(Neu) Advanced Integrations & Automation (In Arbeit):**
+    - [x] **(Abgeschlossen)** Plugin-übergreifende Aktionen: EventBus-System für Pub/Sub-Kommunikation zwischen Plugins implementiert.
+    - [ ] Erweiterte Workflows und Automation-Chains.
     - [ ] Scripting-Schnittstelle für Power-User.
 
 6. **Polishing & Release-Vorbereitung (Geplant):**
@@ -67,7 +72,7 @@ Das MMST soll eine plattformübergreifende (Windows & Linux) Python-Anwendung we
   - [x] Preset-Verwaltung (Speichern, Laden, Löschen) implementiert.
   - [x] Slider-Werte werden in Config gespeichert.
   - [x] DSP-Pipeline für Echtzeit-Equalizing integriert.
-  - [ ] **(Neu)** Echtzeit-Visualisierung: Einen Spektrum-Analysator neben den EQ-Bändern anzeigen, der das Audiosignal visualisiert.
+  - [x] **(Abgeschlossen)** Echtzeit-Visualisierung: Spektrum-Analysator mit FFT-basierter 10-Band-Visualisierung implementiert (automatisches Start/Stop mit EQ-Engine, color-coded bars).
   - [ ] **(Neu)** Zusätzliche DSP-Effekte: Einen "Noise Gate" und "Kompressor" für Aufnahmequellen hinzufügen.
 
 - **Recording Pipeline**
@@ -95,8 +100,8 @@ Das MMST soll eine plattformübergreifende (Windows & Linux) Python-Anwendung we
 
 - **Feature: Backup-Tool**
   - [x] UI, Backend, Fortschrittsanzeige und `send2trash` implementiert.
-  - [ ] **(Neu)** Backup-Profile: Speichern und Laden von häufig genutzten Backup-Jobs (Quelle, Ziel, Einstellungen).
-  - [ ] **(Neu)** "Dry Run"-Modus: Simulation eines Backups, die anzeigt, welche Dateien kopiert, überschrieben oder gelöscht *würden*.
+  - [x] **(Abgeschlossen)** Backup-Profile: Speichern und Laden von häufig genutzten Backup-Jobs (Quelle, Ziel, Mirror-Modus) via JSON-Persistierung.
+  - [x] **(Abgeschlossen)** "Dry Run"-Modus: Vollständige Simulation mit [DRY RUN] Präfix in Logs, zeigt alle geplanten Operationen ohne Ausführung.
   - [ ] **(Neu)** Zeitgesteuerte Backups: Integration eines Schedulers, um Backups täglich/wöchentlich auszuführen.
 
 ---
@@ -134,15 +139,61 @@ Das MMST soll eine plattformübergreifende (Windows & Linux) Python-Anwendung we
   - [x] Linux-optimierte "Im Ordner anzeigen"-Funktion via `xdg-open` Fallback.
 
 - **Iteration 6 Fokus (Entwurf)**
-  - [ ] Smart Playlists & regelbasierte Vorschläge vorbereiten.
-  - [ ] Statistik-Dashboard für Bibliothekskennzahlen prototypen.
+  - [x] Smart Playlists – Phase 2 gestartet (Persistenz, CRUD-Basis, erweiterte Operatoren, Caching v1) – Erweiterter Editor & komplexe Regeln folgen.
+  - [x] **(Abgeschlossen)** Statistik-Dashboard für Bibliothekskennzahlen: Visuelle Karten mit Datei-Counts/Größen/Bewertungen, Bar-Charts für Genre/Artist-Verteilung, temporale Stats (letzte 7 Tage).
+  - [ ] Verbesserte Benutzeroberfläche für die Playlist-Verwaltung.
+  - [ ] Automatisierungs-Features (z.B. Tags aus Dateipfaden generieren).
   - [ ] Online-Scraper (TheMovieDB/MusicBrainz) evaluieren und anbinden.
 
 - **Zukünftige Erweiterungen (Iteration 6 und darüber hinaus)**
-  - [ ] **(Neu)** **Smart Playlists:** Erstellen von dynamischen Wiedergabelisten basierend auf Filterkriterien (z.B. "Alle Rock-Songs > 4 Sterne aus den 90ern", "Zuletzt hinzugefügte Filme").
+  - [x] **(Neu)** **Smart Playlists (Phase 1):** Regelbasiertes Filtering (Rating, Kind, Dauer, Basis-Metadaten), Default-Beispiele, UI-Tab, Live-Auswertung.
+  - [x] **(Neu)** **Smart Playlists (Phase 2 – laufend):**
+    - Persistenz (JSON Save/Load, Defaults beim ersten Start)
+    - CRUD UI (Neu, Umbenennen, Löschen, Re-Evaluate)
+    - Erweiterte Operatoren (>=, <=, between, contains/not_contains, startswith/endswith, regex, has_tag)
+    - Einfaches Ergebnis-Caching (Signatur-basiert, Invalidierung bei Änderungen)
+    - Unit Tests (Evaluation, Save/Load, Operatoren)
+    - NEU: Regel-Editor Dialog (Name, Beschreibung, Match-Modus, Limit, Sortierung, Tabellenbasierte Rules)
+    - NEU: Operator within_days (mtime innerhalb X Tage)
+  - [ ] **(Geplant)** Smart Playlists (Phase 3):
+  - [x] Grundstein: Erweiterter Editor (Tree-Struktur) – Prototyp erstellt (Nested Gruppen + Preview Count)
+  - [x] Kontextmenü & Doppelklick: Regel bearbeiten / Gruppe toggeln
+  - [x] NOT (Negate) Umschalten pro Gruppe + AND/OR Toggle ohne Komplett-Rebuild
+  - [x] Inline-Regelbearbeitung (Dialog Sequenz Feld/Operator/Wert, inkl. between & within_days)
+  - [x] Auto-Preview nach Struktur-/Regel-Änderungen
+    - [ ] In-place Bearbeitung von Feld / Operator / Wert in Baum
+    - [ ] Drag & Drop Reordering / Gruppierung
+    - [ ] Relative Zeitregeln ("zuletzt X Tage", "Dieses Jahr")
+    - [ ] Erweiterte Negation (NOT auf Einzelregel-Ebene toggelbar)
+    - [ ] Performance: Delta-Reevaluation & inkrementeller Cache
+    - [ ] UI: Live Inline-Vorschau (Top-N Treffer) während Bearbeitung
   - [ ] **(Neu)** **Statistik-Dashboard:** Eine visuelle Übersicht der Bibliothek (Anzahl Dateien, Gesamtgröße, Verteilung nach Genre/Jahr, etc.).
   - [ ] **Scraper:** Einen Online-Scraper implementieren, der Metadaten (inkl. Cover) von TheMovieDB, MusicBrainz etc. abruft.
   - [ ] **Calibre (Recherche):** Analyse der `metadata.db` von Calibre, um eine schreibgeschützte Ansicht der E-Book-Bibliothek zu ermöglichen.
+
+### Performance & Skalierung (Neu)
+
+Aktuell umgesetzt für sehr große Bibliotheken ( > 10.000 Einträge ):
+
+| Bereich | Ansatz | Effekt |
+|---------|-------|--------|
+| Tabellen-Befüllung | Chunked Loading (erste 1000 synchron, danach 1500er Batches via QTimer) | UI friert nicht mehr beim Laden großer Datasets |
+| Galerie-Befüllung | Gleiches Chunking + verzögerte Icon-Anreicherung | Schnelles initiales Scrolling ohne Blockade |
+| Cover-Laden | Asynchron via QThreadPool + Platzhalter-Icons | Kein UI-Stutter durch disk/network IO |
+| Selektions-Sync | Signal-Blockierung & Redundanzprüfung | Verhindert Deadlocks / blockierte Auswahl |
+
+Geplante Optimierungen:
+
+- Scroll-gesteuerte Nachladung (Demand-Driven statt Timer-Sequenz)
+- Adaptives Batch-Sizing basierend auf Renderdauer
+- Optionaler Preload-Index für häufig benutzte Sortierkriterien
+- Konfigurierbarer Schwellwert & Dev-Schalter für Benchmarking
+
+Risiken & Mitigation:
+
+- Race Conditions bei Cover-Updates → Pfadbasierter Matching-Check
+- Hohe Thread-Auslastung bei massiven Cover-Anfragen → Nutzung von globalInstance() des ThreadPools (Qt limitiert Worker)
+- Test-Stabilität → Feature deaktiviert für kleine Datenmengen (unterhalb Threshold unverändert synchron)
 
 ---
 
@@ -155,8 +206,8 @@ Das MMST soll eine plattformübergreifende (Windows & Linux) Python-Anwendung we
 - **Feature: Universal File Converter**
   - [x] UI, Backend, Formatunterstützung und Threading implementiert.
   - [x] Tool-Erkennung für ImageMagick/FFmpeg verbessert (inkl. Pfadauflösung & Nutzerhinweisen).
-  - [ ] **(Neu)** Stapelverarbeitung: Erlaube das Hinzufügen mehrerer Dateien und konvertiere sie nacheinander in einer Warteschlange.
-  - [ ] **(Neu)** Preset-System: Speichern von häufig genutzten Konvertierungseinstellungen (z.B. "MP4 zu GIF", "WAV zu MP3 192kbit").
+  - [x] **(Abgeschlossen)** Stapelverarbeitung: Batch-Warteschlange Tab mit Multi-File-Queue, sequentieller Verarbeitung, Fortschrittsanzeige pro Datei und Gesamtübersicht.
+  - [x] **(Abgeschlossen)** Preset-System: Speichern/Laden von Format-Presets mit JSON-Persistierung, automatisches Ziel-Extension-Update beim Laden.
 
 - **Feature: Image Tools & Compression**
   - [ ] **(Als Nächstes)** **JXL Image Tools:** Recherche und Einbindung einer `libjxl`-Python-Bibliothek für Konvertierung und Anzeige.
@@ -177,3 +228,16 @@ Das MMST soll eine plattformübergreifende (Windows & Linux) Python-Anwendung we
   - [ ] **Warnung:** Dieses Feature wird als "experimentell" markiert.
   - [ ] **Recherche:** Evaluierung von Bibliotheken. **Wird weiterhin zurückgestellt.**
   - [ ] **UI:** Graph-basierte Kurve (Temperatur vs. Lüfterdrehzahl).
+
+  ---
+
+  ## 7. Dokumentationsjournal
+
+  - ✅ 2025-10-04: `.github/copilot-instructions.md` aktualisiert; bündelt Architektur- und Workflow-Hinweise für KI-Agenten.
+  - ✅ 2025-10-04: **Next Big Update abgeschlossen** – 7 Major Features implementiert:
+    - MediaLibrary: Statistik-Dashboard mit visuellen Analytics
+    - FileManager: Intelligente Duplikat-Auswahl + Backup-Profile & Dry-Run
+    - SystemTools: Batch-Warteschlange + Conversion-Presets
+    - AudioTools: Echtzeit-Spektrum-Analyzer (FFT-basiert)
+    - Core: EventBus für Plugin-übergreifende Kommunikation
+  - 🔜 Nächster Meilenstein: Unit Tests für neue Features und Performance-Optimierungen.
