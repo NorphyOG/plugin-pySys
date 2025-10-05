@@ -1,838 +1,13 @@
-from __future__ import annotations
+"""Media Library plugin stub.
 
-import concurrent.futures
-import functools
-import logging
-import random
-import re
-import shlex
-import shutil
-import subprocess
-import sys
-from pathlib import Path
-from typing import Any, Dict, Iterable, List, Optional, Set, Tuple, cast
+Implementation moved to ``_restored_media_library``. This module only
+re-exports the public symbols expected by tests and the plugin manager.
+"""
 
-from PySide6.QtCore import Qt, Signal, QSize, QUrl, QPoint, QEvent, QTimer, QObject, QRect  # type: ignore[import-not-found]
-from PySide6.QtGui import (
-    QDesktopServices,
-    QIcon,
-    QPixmap,
-    QCloseEvent,
-    QKeyEvent,
-    QColor,
-    QPainter,
-)  # type: ignore[import-not-found]
+from ._restored_media_library import MediaLibraryPlugin, MediaLibraryWidget  # type: ignore F401
 
-from .auto_tagger import AutoTagger, PathPattern
-
-
-from PySide6.QtWidgets import (  # type: ignore[import-not-found]
-    QDialog,
-    QApplication,
-    QCheckBox,
-    QFileDialog,
-    QFormLayout,
-    QGroupBox,
-    QHBoxLayout,
-    QLabel,
-    QLineEdit,
-    QListWidget,
-    QListWidgetItem,
-    QAbstractItemView,
-    QComboBox,
-    QInputDialog,
-    QMessageBox,
-    QProgressBar,
-    QPushButton,
-    QMenu,
-    QProgressDialog,
-    QSlider,
-    QSplitter,
-    QTableWidget,
-    QTableWidgetItem,
-    QHeaderView,
-    QTabWidget,
-    QTextEdit,
-    QStyle,
-    QToolButton,
-    QVBoxLayout,
-    QWidget,
-    QSizePolicy,
-)
-
-
-class VisibilityLabel(QLabel):
-    """QLabel that remembers last explicit visibility state (headless-safe)."""
-    def __init__(self, *args: Any, **kwargs: Any) -> None:  # type: ignore[override]
-        super().__init__(*args, **kwargs)
-        self._logical_visible = True
-
-    def setVisible(self, visible: bool) -> None:  # type: ignore[override]
-        self._logical_visible = bool(visible)
-        super().setVisible(visible)
-
-    def isVisible(self) -> bool:  # type: ignore[override]
-        return self._logical_visible
-
-try:  # pragma: no cover - optional dependency
-    from PySide6.QtMultimedia import QMediaPlayer, QAudioOutput  # type: ignore[import-not-found]
-    from PySide6.QtMultimediaWidgets import QVideoWidget  # type: ignore[import-not-found]
-except Exception:  # pragma: no cover - multimedia optional
-    QMediaPlayer = None  # type: ignore[assignment]
-    QAudioOutput = None  # type: ignore[assignment]
-    QVideoWidget = None  # type: ignore[assignment]
-
-HAS_QT_MULTIMEDIA = bool(QMediaPlayer) and bool(QAudioOutput)
-HAS_VIDEO_WIDGET = HAS_QT_MULTIMEDIA and bool(QVideoWidget)
-
-MediaPlayerCls = cast(Any, QMediaPlayer)
-AudioOutputCls = cast(Any, QAudioOutput)
-VideoWidgetCls = cast(Any, QVideoWidget)
-
-
-def _tinted_icon(source: QIcon, color: QColor) -> QIcon:
-    """Return a colorized copy of the given icon."""
-    if source.isNull():
-        return source
-    result = QIcon()
-    sizes = {16, 20, 24, 28, 32, 40, 48}
-    for size in sorted(sizes):
-        pixmap = source.pixmap(size, size)
-        if pixmap.isNull():
-            continue
-        tinted = QPixmap(pixmap.size())
-        tinted.fill(Qt.GlobalColor.transparent)
-        painter = QPainter(tinted)
-        painter.drawPixmap(0, 0, pixmap)
-        composition_mode = getattr(QPainter, "CompositionMode_SourceIn", None)
-        if composition_mode is not None:
-            painter.setCompositionMode(composition_mode)
-        painter.fillRect(tinted.rect(), color)
-        painter.end()
-        result.addPixmap(tinted, QIcon.Mode.Normal, QIcon.State.Off)
-        result.addPixmap(tinted, QIcon.Mode.Active, QIcon.State.Off)
-    return result if not result.isNull() else source
-
-
-from PySide6.QtCore import QRunnable, QThreadPool, QObject as QtObject  # type: ignore[import-not-found]
-
-
-class _CoverResultEmitter(QtObject):  # separate QObject for thread-signal safety
-    cover_ready = Signal(str, QPixmap)
-
-
-class _CoverLoadTask(QRunnable):
-    def __init__(self, path: Path, kind: str, plugin: Any, emitter: _CoverResultEmitter):
-        super().__init__()
-        self._path = path
-        self._kind = kind
-        self._plugin = plugin
-        self._emitter = emitter
-
-    def run(self) -> None:  # type: ignore[override]
-        try:
-            pixmap = self._plugin.cover_pixmap(self._path, self._kind)
-            if isinstance(pixmap, QPixmap) and not pixmap.isNull():
-                self._emitter.cover_ready.emit(str(self._path), pixmap)
-        except Exception:
-            # silent fail – placeholder remains
-            pass
-
-
-class MediaPreviewWidget(QWidget):
-    status_message = Signal(str)
-
-    def __init__(self, parent: Optional[QWidget] = None) -> None:
-        super().__init__(parent)
-        self.setObjectName("mediaPreview")
-        # Logical visibility flag (headless test friendly)
-        self._logical_visible = True
-
-        self._available = HAS_QT_MULTIMEDIA
-        self._current_path: Optional[Path] = None
-        self._current_kind: Optional[str] = None
-        self._duration: int = 0
-        self._slider_pressed = False
-
-        self.player: Any = None
-        self.audio_output: Any = None
-        self.video_widget: Optional[QWidget] = None
-        self.play_button: Optional[QToolButton] = None
-        self.stop_button: Optional[QToolButton] = None
-        self.position_slider: Optional[QSlider] = None
-        self.time_label: Optional[QLabel] = None
-        self.volume_slider: Optional[QSlider] = None
-
-        layout = QVBoxLayout(self)
-        layout.setContentsMargins(0, 0, 0, 0)
-        layout.setSpacing(6)
-
-        if not self._available:
-            notice = QLabel(
-                "Integrierte Wiedergabe benötigt das QtMultimedia-Modul. Bitte PySide6-QtMultimedia installieren."
-            )
-            notice.setWordWrap(True)
-            notice.setAlignment(Qt.AlignmentFlag.AlignCenter)
-            layout.addWidget(notice)
-            self._info_label = notice
-            return
-
-        self.player = MediaPlayerCls(self)
-        self.audio_output = AudioOutputCls(self)
-        self.player.setAudioOutput(self.audio_output)
-        self.audio_output.setVolume(0.8)
-
-        if HAS_VIDEO_WIDGET and VideoWidgetCls is not None:
-            video_widget = VideoWidgetCls(self)
-            video_widget.setMinimumHeight(220)
-            video_widget.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
-            video_widget.setStyleSheet("background-color: black;")
-            video_widget.hide()
-            layout.addWidget(video_widget, stretch=1)
-            self.player.setVideoOutput(video_widget)
-            self.video_widget = video_widget
-
-        self._info_label = QLabel("Keine Vorschau geladen")
-        self._info_label.setWordWrap(True)
-        self._info_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        layout.addWidget(self._info_label)
-
-        controls = QWidget(self)
-        controls.setStyleSheet("background-color: rgba(0, 0, 0, 120); color: white;")
-        controls_layout = QHBoxLayout(controls)
-        controls_layout.setContentsMargins(0, 0, 0, 0)
-        controls_layout.setSpacing(6)
-
-        self._icon_color = QColor("#f4f4f4")
-
-        self.play_button = QToolButton(controls)
-        self.play_button.setEnabled(False)
-        self.play_button.setIcon(self._control_icon(QStyle.StandardPixmap.SP_MediaPlay))
-        self.play_button.setIconSize(QSize(28, 28))
-        self.play_button.setToolTip("Abspielen")
-        self.play_button.clicked.connect(self._toggle_playback)
-        controls_layout.addWidget(self.play_button)
-
-        self.stop_button = QToolButton(controls)
-        self.stop_button.setEnabled(False)
-        self.stop_button.setIcon(self._control_icon(QStyle.StandardPixmap.SP_MediaStop))
-        self.stop_button.setIconSize(QSize(24, 24))
-        self.stop_button.setToolTip("Stopp")
-        self.stop_button.clicked.connect(self.stop)
-        controls_layout.addWidget(self.stop_button)
-
-        self.position_slider = QSlider(Qt.Orientation.Horizontal, controls)
-        self.position_slider.setRange(0, 0)
-        self.position_slider.setSingleStep(1000)
-        self.position_slider.sliderPressed.connect(self._on_slider_pressed)
-        self.position_slider.sliderReleased.connect(self._on_slider_released)
-        self.position_slider.sliderMoved.connect(self._on_slider_moved)
-        controls_layout.addWidget(self.position_slider, stretch=1)
-
-        self.time_label = QLabel("00:00 / 00:00", controls)
-        self.time_label.setMinimumWidth(110)
-        self.time_label.setStyleSheet("color: white; font-family: 'Fira Mono', monospace;")
-        controls_layout.addWidget(self.time_label)
-
-        self.volume_slider = QSlider(Qt.Orientation.Horizontal, controls)
-        self.volume_slider.setRange(0, 100)
-        self.volume_slider.setFixedWidth(100)
-        self.volume_slider.setValue(80)
-        self.volume_slider.valueChanged.connect(self._on_volume_changed)
-        controls_layout.addWidget(self.volume_slider)
-
-        layout.addWidget(controls)
-
-        self.player.playbackStateChanged.connect(self._on_playback_state_changed)  # type: ignore[attr-defined]
-        self.player.positionChanged.connect(self._on_position_changed)
-        self.player.durationChanged.connect(self._on_duration_changed)
-        self.player.mediaStatusChanged.connect(self._on_media_status_changed)
-        try:
-            self.player.errorOccurred.connect(self._on_error)  # type: ignore[attr-defined]
-        except AttributeError:  # pragma: no cover - older Qt bindings
-            try:
-                self.player.error.connect(self._on_error)  # type: ignore[attr-defined]
-            except AttributeError:
-                pass
-
-    # --- logical visibility overrides (for tests in headless mode) ---
-    def setVisible(self, visible: bool) -> None:  # type: ignore[override]
-        self._logical_visible = bool(visible)
-        super().setVisible(visible)
-
-    def isVisible(self) -> bool:  # type: ignore[override]
-        return self._logical_visible
-
-    def clear(self, message: Optional[str] = None) -> None:
-        if not self._available or self.player is None or self.play_button is None or self.stop_button is None:
-            if message:
-                self._info_label.setText(message)
-            return
-
-        slider = self.position_slider
-        time_label = self.time_label
-
-        self._current_path = None
-        self._current_kind = None
-        self._duration = 0
-        self.player.stop()
-        self._update_play_button()
-        self.play_button.setEnabled(False)
-        self.stop_button.setEnabled(False)
-        if slider is not None:
-            slider.setRange(0, 0)
-            slider.setValue(0)
-            slider.setEnabled(False)
-        if time_label is not None:
-            time_label.setText("00:00 / 00:00")
-        if self.video_widget is not None:
-            self.video_widget.hide()
-        self._info_label.setText(message or "Keine Vorschau geladen")
-
-    def set_media(self, path: Path, kind: str) -> None:
-        if not self._available or self.player is None or self.play_button is None or self.stop_button is None:
-            self._info_label.setText("QtMultimedia nicht verfügbar – Externe Wiedergabe verwenden.")
-            return
-
-        slider = self.position_slider
-
-        normalized = kind.lower().strip() if kind else ""
-        if normalized not in {"audio", "video"}:
-            self.clear("Keine Vorschau für diesen Dateityp verfügbar.")
-            return
-
-        self._current_path = path
-        self._current_kind = normalized
-        self._duration = 0
-        self.player.stop()
-        self.player.setSource(QUrl.fromLocalFile(str(path)))
-        self.play_button.setEnabled(True)
-        self.stop_button.setEnabled(True)
-        if slider is not None:
-            slider.setEnabled(False)
-            slider.setRange(0, 0)
-            slider.setValue(0)
-
-        display_name = path.name
-        if normalized == "video":
-            if self.video_widget is not None:
-                self.video_widget.show()
-                self._info_label.setText(f"Video: {display_name}")
-            else:
-                self._info_label.setText("Videoausgabe nicht verfügbar – Ton wird abgespielt.")
-        else:
-            if self.video_widget is not None:
-                self.video_widget.hide()
-            self._info_label.setText(f"Audio: {display_name}")
-        self._update_play_button()
-
-    def stop(self) -> None:
-        if not self._available or self.player is None:
-            return
-        self.player.stop()
-        self._update_play_button()
-
-    def _control_icon(self, standard: QStyle.StandardPixmap) -> QIcon:
-        color = getattr(self, "_icon_color", QColor("#f4f4f4"))
-        return _tinted_icon(self.style().standardIcon(standard), color)
-
-    def _toggle_playback(self) -> None:
-        if (
-            not self._available
-            or self.player is None
-            or self.play_button is None
-            or not self.play_button.isEnabled()
-        ):
-            return
-        state = self.player.playbackState()
-        playing_value = self._playing_state_value()
-        if state == playing_value:
-            self.player.pause()
-        else:
-            self.player.play()
-
-    def _on_volume_changed(self, value: int) -> None:
-        if not self._available or self.audio_output is None:
-            return
-        self.audio_output.setVolume(max(0.0, min(1.0, value / 100.0)))
-
-    def _on_playback_state_changed(self, _state: int) -> None:
-        self._update_play_button()
-
-    def _on_position_changed(self, position: int) -> None:
-        if not self._available or self._slider_pressed or self.position_slider is None:
-            return
-        self.position_slider.setValue(position)
-        self._update_time_label(position)
-
-    def _on_duration_changed(self, duration: int) -> None:
-        if not self._available:
-            return
-        self._duration = max(0, duration)
-        if self.position_slider is not None:
-            self.position_slider.setRange(0, self._duration if self._duration > 0 else 0)
-            self.position_slider.setEnabled(self._duration > 0)
-        self._update_time_label(self.position_slider.value() if self.position_slider is not None else 0)
-
-    def _on_media_status_changed(self, status: int) -> None:
-        if not self._available:
-            return
-        loading_status = self._media_status_value("LoadingMedia")
-        loaded_status = self._media_status_value("LoadedMedia")
-        buffered_status = self._media_status_value("BufferedMedia")
-        invalid_status = self._media_status_value("InvalidMedia")
-
-        if status == loading_status:
-            self._info_label.setText("Lade Vorschau…")
-        elif status in (loaded_status, buffered_status):
-            if self._current_path:
-                prefix = "Video" if self._current_kind == "video" else "Audio"
-                self._info_label.setText(f"{prefix}: {self._current_path.name}")
-        elif status == invalid_status:
-            self.clear("Datei kann nicht wiedergegeben werden.")
-            if self._current_path:
-                self.status_message.emit(f"Wiedergabe fehlgeschlagen: {self._current_path.name}")
-
-    def _on_error(self, *args: Any) -> None:  # pragma: no cover - Qt specific
-        message = "Unbekannter Fehler"
-        if len(args) >= 2 and isinstance(args[1], str) and args[1]:
-            message = args[1]
-        elif len(args) == 1 and isinstance(args[0], str) and args[0]:
-            message = args[0]
-        if self._current_path:
-            self.status_message.emit(f"Fehler bei Wiedergabe von {self._current_path.name}: {message}")
-        self.clear("Fehler bei der Wiedergabe.")
-
-    def _on_slider_pressed(self) -> None:
-        self._slider_pressed = True
-
-    def _on_slider_released(self) -> None:
-        if not self._available:
-            self._slider_pressed = False
-            return
-        self._slider_pressed = False
-        if self.player is not None and self.position_slider is not None:
-            self.player.setPosition(self.position_slider.value())
-
-    def _on_slider_moved(self, value: int) -> None:
-        self._update_time_label(value)
-
-    def _update_play_button(self) -> None:
-        if not self._available or self.play_button is None or self.player is None:
-            return
-        state = self.player.playbackState()
-        playing_value = self._playing_state_value()
-        if state == playing_value:
-            self.play_button.setIcon(self._control_icon(QStyle.StandardPixmap.SP_MediaPause))
-            self.play_button.setToolTip("Pausieren")
-        else:
-            self.play_button.setIcon(self._control_icon(QStyle.StandardPixmap.SP_MediaPlay))
-            self.play_button.setToolTip("Abspielen")
-
-    def _update_time_label(self, position: Optional[int] = None) -> None:
-        if not self._available or self.time_label is None:
-            return
-        current_value = 0
-        if position is not None:
-            current_value = max(0, position)
-        elif self.position_slider is not None:
-            current_value = max(0, self.position_slider.value())
-        total = max(0, self._duration)
-        self.time_label.setText(f"{self._format_time(current_value)} / {self._format_time(total)}")
-
-    @staticmethod
-    def _format_time(ms: int) -> str:
-        total_seconds = max(0, int(ms) // 1000)
-        hours, remainder = divmod(total_seconds, 3600)
-        minutes, seconds = divmod(remainder, 60)
-        if hours:
-            return f"{hours:02d}:{minutes:02d}:{seconds:02d}"
-        return f"{minutes:02d}:{seconds:02d}"
-
-    @staticmethod
-    def _media_status_value(name: str) -> Any:
-        status_enum = getattr(MediaPlayerCls, "MediaStatus", None)
-        return getattr(status_enum, name, getattr(MediaPlayerCls, name, None))
-
-    @staticmethod
-    def _playing_state_value() -> Any:
-        playback_enum = getattr(MediaPlayerCls, "PlaybackState", None)
-        value = getattr(playback_enum, "PlayingState", None)
-        if value is None:
-            value = getattr(MediaPlayerCls, "PlayingState", 2)
-        return value
-
-
-class CinemaModeWindow(QWidget):
-    closed = Signal()
-    current_media_changed = Signal(str, dict)
-    status_message = Signal(str)
-
-    def __init__(self, entries: List[Dict[str, Any]], start_index: int = 0, parent: Optional[QWidget] = None) -> None:
-        super().__init__(parent)
-        if not HAS_VIDEO_WIDGET or VideoWidgetCls is None or not HAS_QT_MULTIMEDIA:
-            raise RuntimeError("Cinema mode requires QtMultimedia with video support.")
-
-        self.setWindowFlag(Qt.WindowType.Window)
-        self.setWindowTitle("Kino-Modus")
-        self.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose, True)
-        self.setStyleSheet("background-color: black;")
-
-        self._entries = entries
-        self._current_index = -1
-        self._autoplay = True
-        self._slider_pressed = False
-
-        self.player = MediaPlayerCls(self)
-        self.audio_output = AudioOutputCls(self)
-        self.player.setAudioOutput(self.audio_output)
-        self.audio_output.setVolume(0.85)
-
-        self.video_widget = VideoWidgetCls(self)
-        self.player.setVideoOutput(self.video_widget)
-
-        layout = QVBoxLayout(self)
-        layout.setContentsMargins(0, 0, 0, 0)
-        layout.setSpacing(0)
-        layout.addWidget(self.video_widget, stretch=1)
-
-        controls_container = QWidget(self)
-        controls_container.setStyleSheet("background-color: rgba(0, 0, 0, 190); color: white;")
-        controls_layout = QVBoxLayout(controls_container)
-        controls_layout.setContentsMargins(16, 12, 16, 12)
-        controls_layout.setSpacing(8)
-
-        self.title_label = QLabel("", controls_container)
-        self.title_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self.title_label.setStyleSheet("font-size: 18px; font-weight: 600;")
-        controls_layout.addWidget(self.title_label)
-
-        timeline_row = QHBoxLayout()
-        timeline_row.setContentsMargins(0, 0, 0, 0)
-        timeline_row.setSpacing(12)
-
-        self.position_slider = QSlider(Qt.Orientation.Horizontal, controls_container)
-        self.position_slider.setRange(0, 0)
-        self.position_slider.setSingleStep(1000)
-        self.position_slider.sliderPressed.connect(self._on_slider_pressed)
-        self.position_slider.sliderReleased.connect(self._on_slider_released)
-        self.position_slider.sliderMoved.connect(self._on_slider_moved)
-        timeline_row.addWidget(self.position_slider, stretch=1)
-
-        self.time_label = QLabel("00:00 / 00:00", controls_container)
-        self.time_label.setStyleSheet("font-size: 14px;")
-        self.time_label.setMinimumWidth(140)
-        timeline_row.addWidget(self.time_label)
-
-        controls_layout.addLayout(timeline_row)
-
-        accent_color = QColor("#f5f5f5")
-        icon_size = QSize(32, 32)
-
-        buttons_row = QHBoxLayout()
-        buttons_row.setContentsMargins(0, 0, 0, 0)
-        buttons_row.setSpacing(12)
-
-        self.prev_button = QToolButton(controls_container)
-        self.prev_button.setIcon(
-            _tinted_icon(self.style().standardIcon(QStyle.StandardPixmap.SP_MediaSkipBackward), accent_color)
-        )
-        self.prev_button.setIconSize(icon_size)
-        self.prev_button.setToolTip("Vorheriges Video")
-        self.prev_button.clicked.connect(self._play_previous)
-        buttons_row.addWidget(self.prev_button)
-
-        self.play_button = QToolButton(controls_container)
-        self.play_button.setIcon(
-            _tinted_icon(self.style().standardIcon(QStyle.StandardPixmap.SP_MediaPlay), accent_color)
-        )
-        self.play_button.setIconSize(icon_size)
-        self.play_button.setToolTip("Abspielen/Pausieren")
-        self.play_button.clicked.connect(self._toggle_playback)
-        buttons_row.addWidget(self.play_button)
-
-        self.next_button = QToolButton(controls_container)
-        self.next_button.setIcon(
-            _tinted_icon(self.style().standardIcon(QStyle.StandardPixmap.SP_MediaSkipForward), accent_color)
-        )
-        self.next_button.setIconSize(icon_size)
-        self.next_button.setToolTip("Nächstes Video")
-        self.next_button.clicked.connect(self._play_next)
-        buttons_row.addWidget(self.next_button)
-
-        buttons_row.addSpacing(16)
-
-        self.autoplay_button = QToolButton(controls_container)
-        self.autoplay_button.setText("Autoplay")
-        self.autoplay_button.setCheckable(True)
-        self.autoplay_button.setChecked(True)
-        self.autoplay_button.toggled.connect(self._on_autoplay_toggled)
-        self.autoplay_button.setStyleSheet(
-            "QToolButton { color: #f5f5f5; padding: 4px 10px; border: 1px solid rgba(245,245,245,0.4);"
-            " border-radius: 4px; }"
-            "QToolButton:checked { background-color: rgba(245,245,245,0.18); }"
-        )
-        buttons_row.addWidget(self.autoplay_button)
-
-        buttons_row.addStretch(1)
-
-        self.sequence_label = QLabel("", controls_container)
-        self.sequence_label.setStyleSheet("font-size: 14px;")
-        buttons_row.addWidget(self.sequence_label)
-
-        buttons_row.addStretch(1)
-
-        self.exit_button = QToolButton(controls_container)
-        self.exit_button.setIcon(
-            _tinted_icon(self.style().standardIcon(QStyle.StandardPixmap.SP_TitleBarCloseButton), accent_color)
-        )
-        self.exit_button.setIconSize(QSize(24, 24))
-        self.exit_button.setToolTip("Kino-Modus schließen")
-        self.exit_button.clicked.connect(self.close)
-        buttons_row.addWidget(self.exit_button)
-
-        controls_layout.addLayout(buttons_row)
-
-        layout.addWidget(controls_container, stretch=0)
-
-        self.player.playbackStateChanged.connect(self._on_playback_state_changed)  # type: ignore[attr-defined]
-        self.player.mediaStatusChanged.connect(self._on_media_status_changed)
-        self.player.positionChanged.connect(self._on_position_changed)
-        self.player.durationChanged.connect(self._on_duration_changed)
-        try:
-            self.player.errorOccurred.connect(self._on_error)  # type: ignore[attr-defined]
-        except AttributeError:  # pragma: no cover - older Qt bindings
-            try:
-                self.player.error.connect(self._on_error)  # type: ignore[attr-defined]
-            except AttributeError:
-                pass
-
-        if not self._entries:
-            raise ValueError("No video entries available for cinema mode")
-        start_index = max(0, min(int(start_index), len(self._entries) - 1))
-        self._load_index(start_index, auto_play=True)
-
-    def _load_index(self, index: int, auto_play: bool = True) -> bool:
-        if index < 0 or index >= len(self._entries):
-            return False
-        entry = self._entries[index]
-        path_value = entry.get("path")
-        if not isinstance(path_value, Path):
-            return False
-        abs_path = path_value
-        if not abs_path.exists():
-            self.status_message.emit(f"Datei nicht gefunden: {abs_path}")
-            return False
-
-        self._slider_pressed = False
-        self.player.stop()
-        self.player.setSource(QUrl.fromLocalFile(str(abs_path)))
-        self.position_slider.setEnabled(False)
-        self.position_slider.setRange(0, 0)
-        self.position_slider.setValue(0)
-        self.time_label.setText("00:00 / 00:00")
-
-        title_text = entry.get("title") or abs_path.name
-        self.title_label.setText(title_text)
-        self.sequence_label.setText(f"{index + 1} / {len(self._entries)}")
-
-        self._current_index = index
-        self._update_navigation_buttons()
-        self.current_media_changed.emit(str(abs_path), dict(entry))
-        if auto_play:
-            self.player.play()
-        return True
-
-    def _update_navigation_buttons(self) -> None:
-        has_prev = self._current_index > 0
-        has_next = self._current_index < len(self._entries) - 1
-        self.prev_button.setEnabled(has_prev)
-        self.next_button.setEnabled(has_next)
-
-    def _toggle_playback(self) -> None:
-        state = self.player.playbackState()
-        playing_value = MediaPreviewWidget._playing_state_value()
-        if state == playing_value:
-            self.player.pause()
-        else:
-            self.player.play()
-
-    def _play_next(self) -> None:
-        if self._current_index < len(self._entries) - 1:
-            self._load_index(self._current_index + 1, auto_play=True)
-
-    def _play_previous(self) -> None:
-        if self._current_index > 0:
-            self._load_index(self._current_index - 1, auto_play=True)
-
-    def _on_autoplay_toggled(self, checked: bool) -> None:
-        self._autoplay = bool(checked)
-
-    def _on_playback_state_changed(self, _state: int) -> None:
-        playing_value = MediaPreviewWidget._playing_state_value()
-        if self.player.playbackState() == playing_value:
-            self.play_button.setIcon(
-                _tinted_icon(self.style().standardIcon(QStyle.StandardPixmap.SP_MediaPause), QColor("#f5f5f5"))
-            )
-            self.play_button.setToolTip("Pausieren")
-        else:
-            self.play_button.setIcon(
-                _tinted_icon(self.style().standardIcon(QStyle.StandardPixmap.SP_MediaPlay), QColor("#f5f5f5"))
-            )
-            self.play_button.setToolTip("Abspielen")
-
-    def _on_media_status_changed(self, status: int) -> None:
-        end_status = MediaPreviewWidget._media_status_value("EndOfMedia")
-        if status == end_status:
-            if self._autoplay and self._current_index < len(self._entries) - 1:
-                self._play_next()
-            return
-
-    def _on_position_changed(self, position: int) -> None:
-        if self._slider_pressed:
-            return
-        self.position_slider.setValue(position)
-        self._update_time_label(position)
-
-    def _on_duration_changed(self, duration: int) -> None:
-        duration = max(0, duration)
-        self.position_slider.setRange(0, duration if duration > 0 else 0)
-        self.position_slider.setEnabled(duration > 0)
-        current_value = self.position_slider.value() if self.position_slider.isEnabled() else 0
-        self._update_time_label(current_value)
-
-    def _on_slider_pressed(self) -> None:
-        self._slider_pressed = True
-
-    def _on_slider_released(self) -> None:
-        self._slider_pressed = False
-        if self.position_slider.isEnabled():
-            self.player.setPosition(self.position_slider.value())
-
-    def _on_slider_moved(self, value: int) -> None:
-        self._update_time_label(value)
-
-    def _update_time_label(self, position: int) -> None:
-        total = self.position_slider.maximum()
-        self.time_label.setText(
-            f"{MediaPreviewWidget._format_time(position)} / {MediaPreviewWidget._format_time(total)}"
-        )
-
-    def _on_error(self, *args: Any) -> None:  # pragma: no cover - Qt specific
-        message = "Unbekannter Fehler"
-        if len(args) >= 2 and isinstance(args[1], str) and args[1]:
-            message = args[1]
-        elif len(args) == 1 and isinstance(args[0], str) and args[0]:
-            message = args[0]
-        self.status_message.emit(message)
-
-    def keyPressEvent(self, event: QKeyEvent) -> None:  # type: ignore[override]
-        key = event.key()
-        if key == Qt.Key.Key_Escape:
-            self.close()
-            return
-        if key == Qt.Key.Key_Space:
-            self._toggle_playback()
-            return
-        if key in (Qt.Key.Key_Right, Qt.Key.Key_PageDown):
-            self._play_next()
-            return
-        if key in (Qt.Key.Key_Left, Qt.Key.Key_PageUp):
-            self._play_previous()
-            return
-        super().keyPressEvent(event)
-
-    def closeEvent(self, event: QCloseEvent) -> None:  # type: ignore[override]
-        try:
-            self.player.stop()
-        finally:
-            self.closed.emit()
-        super().closeEvent(event)
-
-
-class PlaylistPlaybackWindow(QWidget):
-    closed = Signal()
-    status_message = Signal(str)
-
-    def __init__(
-        self,
-        playlist_name: str,
-        entries: List[Dict[str, Any]],
-        parent: Optional[QWidget] = None,
-    ) -> None:
-        super().__init__(parent)
-        if not HAS_QT_MULTIMEDIA:
-            raise RuntimeError("Playlist playback requires QtMultimedia.")
-
-        self.setWindowFlag(Qt.WindowType.Window)
-        self.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose, True)
-        self.setWindowTitle(f"Playlist abspielen – {playlist_name}")
-        self.setObjectName("playlistPlaybackWindow")
-        self.setStyleSheet(
-            "#playlistPlaybackWindow { background-color: #111; color: #f5f5f5; }"
-            "#playlistPlaybackWindow QLabel { color: #f5f5f5; }"
-            "#playlistPlaybackWindow QCheckBox { color: #f5f5f5; }"
-            "#playlistPlaybackWindow QToolButton { color: #f5f5f5; }"
-        )
-
-        self._playlist_name = playlist_name
-        self._entries = entries
-        self._current_index = -1
-        self._auto_advance = True
-        self._ignore_status = False
-
-        layout = QVBoxLayout(self)
-        layout.setContentsMargins(12, 12, 12, 12)
-        layout.setSpacing(8)
-
-        header_row = QHBoxLayout()
-        header_row.setContentsMargins(0, 0, 0, 0)
-        header_row.setSpacing(6)
-        self._playlist_label = QLabel(f"Playlist: {playlist_name}")
-        self._playlist_label.setStyleSheet("font-weight: 600;")
-        header_row.addWidget(self._playlist_label)
-        header_row.addStretch(1)
-        self._auto_checkbox = QCheckBox("Automatisch weiter")
-        self._auto_checkbox.setChecked(True)
-        self._auto_checkbox.toggled.connect(self._on_auto_toggled)
-        header_row.addWidget(self._auto_checkbox)
-        self._close_button = QToolButton(self)
-        self._close_button.setIcon(
-            _tinted_icon(self.style().standardIcon(QStyle.StandardPixmap.SP_TitleBarCloseButton), QColor("#f5f5f5"))
-        )
-        self._close_button.setIconSize(QSize(22, 22))
-        self._close_button.setToolTip("Fenster schließen")
-        self._close_button.clicked.connect(self.close)
-        header_row.addWidget(self._close_button)
-        layout.addLayout(header_row)
-
-        info_row = QHBoxLayout()
-        info_row.setContentsMargins(0, 0, 0, 0)
-        info_row.setSpacing(6)
-        self._now_playing_label = QLabel("Bereit")
-        self._now_playing_label.setWordWrap(True)
-        self._now_playing_label.setStyleSheet("font-size: 15px; font-weight: 500;")
-        info_row.addWidget(self._now_playing_label, stretch=1)
-
-        accent_color = QColor("#f5f5f5")
-        icon_size = QSize(28, 28)
-        controls_container = QWidget(self)
-        controls_container.setStyleSheet("background-color: rgba(255, 255, 255, 0.06); border-radius: 6px;")
-        controls_layout = QHBoxLayout(controls_container)
-        controls_layout.setContentsMargins(6, 4, 6, 4)
-        controls_layout.setSpacing(6)
-        self._prev_button = QToolButton(controls_container)
-        self._prev_button.setIcon(
-            _tinted_icon(self.style().standardIcon(QStyle.StandardPixmap.SP_MediaSkipBackward), accent_color)
-        )
-        self._prev_button.setIconSize(icon_size)
-        self._prev_button.setToolTip("Vorheriger Titel")
-        self._prev_button.clicked.connect(self.play_previous)
-        controls_layout.addWidget(self._prev_button)
-        self._next_button = QToolButton(controls_container)
-        self._next_button.setIcon(
-            _tinted_icon(self.style().standardIcon(QStyle.StandardPixmap.SP_MediaSkipForward), accent_color)
-        )
+Plugin = MediaLibraryPlugin
+__all__ = ["Plugin", "MediaLibraryPlugin", "MediaLibraryWidget"]
         self._next_button.setIconSize(icon_size)
         self._next_button.setToolTip("Nächster Titel")
         self._next_button.clicked.connect(self.play_next)
@@ -2872,6 +2047,45 @@ class MediaLibraryWidget(QWidget):
         rating_value = value if value > 0 else None
         self._plugin.set_rating(self._current_metadata_path, rating_value)
 
+    def _on_enrich_selected(self) -> None:
+        """Prototype enrichment: fetch top candidate and merge."""
+        manager = getattr(self._plugin, "_enrichment_manager", None)
+        if manager is None or self._selected_path is None:
+            return
+        meta = self._plugin._index.get_metadata(self._selected_path)  # type: ignore[attr-defined]
+        if not meta:
+            return
+        title = meta.title or meta.filename or meta.path
+        widget = self
+        def task():
+            try:
+                return manager.search(title, media_type=meta.format or 'audio', context_metadata=meta)
+            except Exception as exc:  # pragma: no cover - defensive
+                return exc
+        def on_done(fut):
+            result = fut.result()
+            if isinstance(result, Exception):
+                self.status_message.emit(f"Enrichment Fehler: {result}")
+                return
+            if not result:
+                self.status_message.emit("Keine Kandidaten gefunden")
+                return
+            try:
+                manager.enrich(meta, result[0])
+                self.status_message.emit("Metadaten angereichert (Top-Kandidat)")
+                self._plugin.services.send_notification("Metadaten angereichert", source=self._plugin.IDENTIFIER)
+                # Refresh detail panel view
+                self._update_detail_panel(meta)
+            except Exception as exc:  # pragma: no cover - defensive
+                self.status_message.emit(f"Enrichment Fehler: {exc}")
+        fut = self._plugin._executor.submit(task)
+        # Post result back to UI thread
+        try:
+            QApplication.instance().aboutToQuit.connect(fut.cancel)  # type: ignore[union-attr]
+        except Exception:  # pragma: no cover
+            pass
+        fut.add_done_callback(lambda f: QApplication.instance().postEvent(widget, _AsyncCallbackEvent(on_done, f)))
+
     def _on_tags_changed(self, tags: List[str]) -> None:
         if self._suppress_tag_signal or self._current_metadata_path is None:
             return
@@ -2930,6 +2144,13 @@ class MediaLibraryWidget(QWidget):
         self._playlist_add_menu = QMenu(self.add_to_playlist_button)
         self.add_to_playlist_button.setMenu(self._playlist_add_menu)
 
+        # Enrichment button (prototype single-item)
+        self.enrich_button = QToolButton()
+        self.enrich_button.setText("Metadaten anreichern")
+        self.enrich_button.setToolTip("Online-Metadaten für ausgewähltes Medium abrufen")
+        self.enrich_button.setEnabled(False)
+        self.enrich_button.clicked.connect(self._on_enrich_selected)
+
         controls_row = QWidget(panel)
         controls_layout = QHBoxLayout(controls_row)
         controls_layout.setContentsMargins(0, 0, 0, 0)
@@ -2938,6 +2159,7 @@ class MediaLibraryWidget(QWidget):
         controls_layout.addWidget(self.external_player_button)
         controls_layout.addWidget(self.cinema_mode_button)
         controls_layout.addWidget(self.add_to_playlist_button)
+        controls_layout.addWidget(self.enrich_button)
         controls_layout.addStretch(1)
         layout.addWidget(controls_row)
 
@@ -3032,6 +2254,8 @@ class MediaLibraryWidget(QWidget):
             self.add_to_playlist_button.setEnabled(False)
         if self.cinema_mode_button is not None:
             self.cinema_mode_button.setEnabled(False)
+        if getattr(self, "enrich_button", None) is not None:
+            self.enrich_button.setEnabled(False)
         self._selected_path = None
         self._current_metadata_path = None
         if self.external_player_button is not None:
@@ -3200,6 +2424,10 @@ class MediaLibraryWidget(QWidget):
 
         self._refresh_external_player_controls(abs_path)
         self._update_add_to_playlist_button_state()
+        # Enable enrichment button if manager available
+        if getattr(self, "enrich_button", None) is not None:
+            has_manager = hasattr(self._plugin, "_enrichment_manager") and getattr(self._plugin, "_enrichment_manager") is not None
+            self.enrich_button.setEnabled(has_manager)
 
         # --- Konsolidierte dynamische Sichtbarkeit (einheitliche Regeln) ---
         try:
@@ -3452,399 +2680,74 @@ class MediaLibraryWidget(QWidget):
             return
         has_path = self._selected_path is not None
         self.add_to_playlist_button.setEnabled(has_path)
+        # Keep enrichment button state in sync
+        if getattr(self, "enrich_button", None) is not None:
+            has_manager = hasattr(self._plugin, "_enrichment_manager") and getattr(self._plugin, "_enrichment_manager") is not None
+            self.enrich_button.setEnabled(has_path and has_manager)
         self._update_playlist_controls_state()
 
-    def _update_playlist_controls_state(self) -> None:
-        has_playlists = bool(self._playlists_cache)
-        has_selection = self._current_playlist_id is not None
-        selection_paths = self._selected_paths()
-        has_media_selection = bool(selection_paths) or self._selected_path is not None
-        has_item_selection = False
-        selected_rows: List[int] = []
-        total_items = 0
-        if self.playlist_items_table is not None:
-            total_items = self.playlist_items_table.rowCount()
-            selection_model = self.playlist_items_table.selectionModel()
-            if selection_model is not None:
-                selected_rows = [index.row() for index in selection_model.selectedRows()]
-                has_item_selection = bool(selected_rows)
+    # --- enrichment detail refresh helper ---------------------------------
+    def _update_detail_panel(self, meta) -> None:  # type: ignore[override]
+        """Lightweight update of detail panel after metadata enrichment.
 
-        if self._playlist_rename_button is not None:
-            self._playlist_rename_button.setEnabled(has_selection)
-        if self._playlist_delete_button is not None:
-            self._playlist_delete_button.setEnabled(has_selection)
-        if self._playlist_add_selection_button is not None:
-            self._playlist_add_selection_button.setEnabled(has_selection and has_media_selection)
-        if self._playlist_remove_button is not None:
-            self._playlist_remove_button.setEnabled(has_selection and has_item_selection)
-        if self._playlist_move_up_button is not None:
-            can_move_up = has_selection and has_item_selection and any(row > 0 for row in selected_rows)
-            self._playlist_move_up_button.setEnabled(can_move_up)
-        if self._playlist_move_down_button is not None:
-            can_move_down = has_selection and has_item_selection and any(row < total_items - 1 for row in selected_rows)
-            self._playlist_move_down_button.setEnabled(can_move_down)
-        if self._playlist_play_button is not None:
-            can_play = has_selection and total_items > 0 and HAS_QT_MULTIMEDIA
-            self._playlist_play_button.setEnabled(can_play)
-            if not HAS_QT_MULTIMEDIA:
-                self._playlist_play_button.setToolTip("QtMultimedia nicht verfügbar")
-            elif can_play:
-                self._playlist_play_button.setToolTip("Playlist abspielen")
-            else:
-                self._playlist_play_button.setToolTip("")
-        if self.playlists_list is not None and not has_playlists:
-            self.playlists_list.setCurrentRow(-1)
-
-    def _on_playlist_selection_changed(
-        self, current: Optional[QListWidgetItem], previous: Optional[QListWidgetItem]
-    ) -> None:
-        if current is None:
-            if self._playlist_player_window is not None:
-                self._playlist_player_window.close()
-            self._current_playlist_id = None
-            self._refresh_playlist_items(None)
-            self._update_playlist_controls_state()
-            return
-        data = current.data(Qt.ItemDataRole.UserRole)
-        playlist_id = int(data) if isinstance(data, int) else None
-        if playlist_id != self._current_playlist_id and self._playlist_player_window is not None:
-            self._playlist_player_window.close()
-        self._current_playlist_id = playlist_id
-        self._refresh_playlist_items(playlist_id)
-        self._update_playlist_controls_state()
-
-    def _refresh_playlist_items(self, playlist_id: Optional[int]) -> None:
-        if self.playlist_items_table is None:
-            return
-        self.playlist_items_table.setRowCount(0)
-        entry = self._playlist_entry_by_id(playlist_id)
-        if playlist_id is None or entry is None:
-            if self.playlist_title_label is not None:
-                self.playlist_title_label.setText("Keine Playlist ausgewählt")
-            self._update_playlist_controls_state()
-            return
-
-        items = self._plugin.list_playlist_items(int(playlist_id))
-        self.playlist_items_table.setRowCount(len(items))
-        for row_index, (media, source_path) in enumerate(items):
-            abs_path = (source_path / Path(media.path)).resolve(strict=False)
-            metadata = self._get_cached_metadata(abs_path)
-            title = metadata.title or Path(media.path).stem
-            artist = metadata.artist or "—"
-            album = metadata.album or "—"
-            duration_text = self._format_duration(metadata.duration) if metadata.duration else "—"
-
-            title_item = QTableWidgetItem(title)
-            title_item.setData(self.PATH_ROLE, str(abs_path))
-            self.playlist_items_table.setItem(row_index, 0, title_item)
-            self.playlist_items_table.setItem(row_index, 1, QTableWidgetItem(artist))
-            self.playlist_items_table.setItem(row_index, 2, QTableWidgetItem(album))
-            self.playlist_items_table.setItem(row_index, 3, QTableWidgetItem(duration_text))
-
-        if self.playlist_title_label is not None:
-            count = len(items)
-            self.playlist_title_label.setText(f"{entry['name']} • {count} Titel")
-
-        self._update_playlist_controls_state()
-
-    def _create_playlist_dialog(self) -> None:
-        name, accepted = QInputDialog.getText(self, "Neue Playlist", "Name der Playlist:")
-        if not accepted:
-            return
-        if not name.strip():
-            self.status_message.emit("Playlist-Name darf nicht leer sein.")
-            return
-        playlist_id = self._plugin.create_playlist(name)
-        if playlist_id is None:
-            self.status_message.emit("Playlist konnte nicht erstellt werden (Name möglicherweise bereits vorhanden).")
-            return
-        self.status_message.emit(f"Playlist angelegt: {name.strip()}")
-        self._refresh_playlists(select_id=playlist_id)
-
-    def _rename_selected_playlist(self) -> None:
-        if self._current_playlist_id is None or self.playlists_list is None:
-            return
-        current_item = self.playlists_list.currentItem()
-        if current_item is None:
-            return
-        old_name = str(current_item.data(Qt.ItemDataRole.UserRole + 1) or current_item.text())
-        new_name, accepted = QInputDialog.getText(self, "Playlist umbenennen", "Neuer Name:", text=old_name)
-        if not accepted:
-            return
-        new_name = new_name.strip()
-        if not new_name:
-            self.status_message.emit("Playlist-Name darf nicht leer sein.")
-            return
-        if not self._plugin.rename_playlist(self._current_playlist_id, new_name):
-            self.status_message.emit("Playlist konnte nicht umbenannt werden (Name möglicherweise bereits vorhanden).")
-            return
-        self.status_message.emit(f"Playlist umbenannt in: {new_name}")
-        self._refresh_playlists(select_id=self._current_playlist_id)
-
-    def _delete_selected_playlist(self) -> None:
-        if self._current_playlist_id is None or self.playlists_list is None:
-            return
-        current_item = self.playlists_list.currentItem()
-        if current_item is None:
-            return
-        name = str(current_item.data(Qt.ItemDataRole.UserRole + 1) or current_item.text())
-        confirm = QMessageBox.question(
-            self,
-            "Playlist löschen",
-            f"Soll die Playlist '{name}' wirklich gelöscht werden?",
-            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
-            QMessageBox.StandardButton.No,
-        )
-        if confirm != QMessageBox.StandardButton.Yes:
-            return
-        if self._plugin.delete_playlist(self._current_playlist_id):
-            self.status_message.emit(f"Playlist gelöscht: {name}")
-            self._current_playlist_id = None
-            self._refresh_playlists()
-        else:
-            self.status_message.emit("Playlist konnte nicht gelöscht werden.")
-
-    def _add_selected_media_to_playlist(self) -> None:
-        if self._current_playlist_id is None:
-            self.status_message.emit("Bitte zuerst eine Playlist auswählen.")
-            return
-        paths = self._selected_paths()
-        if not paths and self._selected_path is not None:
-            paths = [self._selected_path]
-        if not paths:
-            self.status_message.emit("Keine Mediendateien ausgewählt.")
-            return
-
-        entry = self._playlist_entry_by_id(self._current_playlist_id)
-        playlist_name = entry["name"] if entry else f"Playlist {self._current_playlist_id}"
-        added, skipped = self._add_paths_to_playlist(self._current_playlist_id, paths)
-        parts: List[str] = []
-        if added:
-            parts.append(f"{added} neue Titel hinzugefügt")
-        if skipped:
-            parts.append(f"{skipped} bereits vorhanden")
-        if not parts:
-            summary = "Keine neuen Titel hinzugefügt"
-        else:
-            summary = ", ".join(parts)
-        self.status_message.emit(f"{summary} (Playlist '{playlist_name}')")
-
-    def _add_current_to_playlist(self, playlist_id: int) -> None:
-        paths = self._selected_paths()
-        if not paths and self._selected_path is not None:
-            paths = [self._selected_path]
-        if not paths:
-            self.status_message.emit("Keine Mediendateien ausgewählt.")
-            return
-        entry = self._playlist_entry_by_id(playlist_id)
-        playlist_name = entry["name"] if entry else f"Playlist {playlist_id}"
-        added, skipped = self._add_paths_to_playlist(playlist_id, paths)
-        if added:
-            self.status_message.emit(f"{added} Titel zur Playlist '{playlist_name}' hinzugefügt.")
-        elif skipped:
-            self.status_message.emit(f"Titel bereits in Playlist '{playlist_name}'.")
-        else:
-            self.status_message.emit(f"Keine Titel zur Playlist '{playlist_name}' hinzugefügt.")
-
-    def _remove_selected_playlist_items(self) -> None:
-        if self._current_playlist_id is None or self.playlist_items_table is None:
-            return
-        selection_model = self.playlist_items_table.selectionModel()
-        if selection_model is None or not selection_model.hasSelection():
-            return
-        rows = sorted({index.row() for index in selection_model.selectedRows()}, reverse=True)
-        removed = False
-        for row in rows:
-            item = self.playlist_items_table.item(row, 0)
-            if item is None:
-                continue
-            path_value = item.data(self.PATH_ROLE)
-            if not path_value:
-                continue
-            if self._plugin.remove_from_playlist(self._current_playlist_id, Path(str(path_value))):
-                removed = True
-        if removed:
-            self.status_message.emit("Titel aus Playlist entfernt.")
-            self._refresh_playlists(select_id=self._current_playlist_id)
-            self._refresh_playlist_items(self._current_playlist_id)
-        else:
-            self.status_message.emit("Keine Titel entfernt.")
-
-    def _play_selected_playlist(self) -> None:
-        if not HAS_QT_MULTIMEDIA:
-            self.status_message.emit("QtMultimedia nicht verfügbar – Wiedergabe nicht möglich.")
-            return
-        if self._current_playlist_id is None:
-            self.status_message.emit("Bitte zuerst eine Playlist auswählen.")
-            return
-
-        raw_items = self._plugin.list_playlist_items(int(self._current_playlist_id))
-        playable: List[Dict[str, Any]] = []
-        skipped = 0
-        for index, (media, source_path) in enumerate(raw_items):
-            abs_path = (source_path / Path(media.path)).resolve(strict=False)
-            kind = str(getattr(media, "kind", "") or "").strip().lower()
-            if kind not in {"audio", "video"}:
-                skipped += 1
-                continue
-            metadata = self._get_cached_metadata(abs_path)
-            title = metadata.title if metadata and metadata.title else Path(media.path).stem
-            subtitle_parts: List[str] = []
-            if metadata and metadata.artist:
-                subtitle_parts.append(metadata.artist)
-            if metadata and metadata.album:
-                subtitle_parts.append(metadata.album)
-            subtitle = " • ".join(part for part in subtitle_parts if part)
-            duration_text = None
-            if metadata and metadata.duration:
-                duration_text = self._format_duration(metadata.duration)
-            playable.append(
-                {
-                    "path": abs_path,
-                    "kind": kind,
-                    "title": title,
-                    "subtitle": subtitle,
-                    "duration_text": duration_text,
-                    "source_index": index,
-                }
-            )
-
-        if not playable:
-            message = "Playlist enthält keine abspielbaren Audio- oder Videodateien."
-            if skipped:
-                message += f" ({skipped} Einträge übersprungen.)"
-            self.status_message.emit(message)
-            return
-
-        playlist_entry = self._playlist_entry_by_id(self._current_playlist_id)
-        playlist_name = playlist_entry["name"] if playlist_entry else f"Playlist {self._current_playlist_id}"
-
-        start_index = 0
-        if self.playlist_items_table is not None:
-            selection_model = self.playlist_items_table.selectionModel()
-            if selection_model is not None and selection_model.selectedRows():
-                selected_row = min(index.row() for index in selection_model.selectedRows())
-                for idx, entry in enumerate(playable):
-                    source_idx = entry.get("source_index")
-                    if isinstance(source_idx, int) and source_idx >= selected_row:
-                        start_index = idx
-                        break
-                else:
-                    start_index = len(playable) - 1
-
-        payload: List[Dict[str, Any]] = []
-        for entry in playable:
-            cloned = dict(entry)
-            cloned.pop("source_index", None)
-            payload.append(cloned)
-
-        if self._playlist_player_window is not None:
-            try:
-                self._playlist_player_window.close()
-            except RuntimeError:
-                pass
-            self._playlist_player_window = None
-
-        window = PlaylistPlaybackWindow(playlist_name, payload, parent=self)
-        window.closed.connect(self._on_playlist_player_closed)
-        window.status_message.connect(self.status_message.emit)
-        self._playlist_player_window = window
-
-        window.start(start_index)
-        if window.current_entry() is None:
-            return
-
-        if skipped:
-            word = "Eintrag" if skipped == 1 else "Einträge"
-            self.status_message.emit(
-                f"Playlist „{playlist_name}“ gestartet ({skipped} {word} übersprungen)."
-            )
-        else:
-            self.status_message.emit(f"Playlist „{playlist_name}“ gestartet.")
-
-    def _move_playlist_items_up(self) -> None:
-        self._move_playlist_items(-1)
-
-    def _move_playlist_items_down(self) -> None:
-        self._move_playlist_items(1)
-
-    def _move_playlist_items(self, offset: int) -> None:
-        if offset == 0 or self.playlist_items_table is None or self._current_playlist_id is None:
-            return
-
-        selection_model = self.playlist_items_table.selectionModel()
-        if selection_model is None or not selection_model.hasSelection():
-            return
-
-        selected_rows = sorted({index.row() for index in selection_model.selectedRows()})
-        if not selected_rows:
-            return
-
-        row_count = self.playlist_items_table.rowCount()
-        if offset > 0:
-            selected_rows = list(reversed(selected_rows))
-
-        current_order: List[str] = []
-        for row in range(row_count):
-            item = self.playlist_items_table.item(row, 0)
-            if item is None:
-                return
-            path_value = item.data(self.PATH_ROLE)
-            if not isinstance(path_value, str):
-                return
-            current_order.append(path_value)
-
-        selected_paths: Set[str] = set()
-        for row in selected_rows:
-            item = self.playlist_items_table.item(row, 0)
-            if item is None:
-                continue
-            path_value = item.data(self.PATH_ROLE)
-            if isinstance(path_value, str):
-                selected_paths.add(path_value)
-
-        moved = False
-        for row in selected_rows:
-            target = row + offset
-            if target < 0 or target >= row_count:
-                continue
-            current_order[row], current_order[target] = current_order[target], current_order[row]
-            moved = True
-
-        if not moved:
-            return
-
-        if not hasattr(self._plugin, "reorder_playlist_items"):
-            self.status_message.emit("Reihenfolge kann nicht gespeichert werden: Playlist-Funktion nicht verfügbar.")
-            return
-
-        ordered_paths = [Path(path_str) for path_str in current_order]
+        Only updates fields that enrichment might change (title, artist, album, year, genre, comment, rating, tags) and heading.
+        Safe even if current selection changed meanwhile.
+        """
         try:
-            success = self._plugin.reorder_playlist_items(self._current_playlist_id, ordered_paths)
-        except Exception as exc:  # pragma: no cover - defensive reporting
-            self.status_message.emit(f"Playlist-Reihenfolge fehlgeschlagen: {exc}")
-            success = False
+            if self._current_metadata_path is None:
+                return
+            # Ensure we're still looking at the same file
+            if str(self._current_metadata_path) != str(meta.path):  # type: ignore[attr-defined]
+                return
+            display_title = getattr(meta, "title", None) or self.detail_heading.text()
+            self.detail_heading.setText(display_title)
+            self.detail_heading.setToolTip(display_title)
+            self._set_detail_field("title", getattr(meta, "title", None))
+            self._set_detail_field("artist", getattr(meta, "artist", None))
+            self._set_detail_field("album", getattr(meta, "album", None))
+            self._set_detail_field("album_artist", getattr(meta, "album_artist", None))
+            self._set_detail_field("year", str(getattr(meta, "year", "")) if getattr(meta, "year", None) else None)
+            self._set_detail_field("genre", getattr(meta, "genre", None))
+            self._set_detail_field("composer", getattr(meta, "composer", None))
+            tags = getattr(meta, "tags", None)
+            tags_text = ", ".join(tags) if tags else None
+            self._set_detail_field("tags", tags_text)
+            if self._detail_comment is not None:
+                comment = getattr(meta, "comment", None)
+                if comment:
+                    self._detail_comment.setPlainText(comment)
+            if self._rating_bar is not None and getattr(meta, "rating", None) is not None:
+                self._suppress_rating_signal = True
+                self._rating_bar.update_rating(getattr(meta, "rating", 0) or 0)
+                self._suppress_rating_signal = False
+        except Exception:  # pragma: no cover - defensive best-effort update
+            pass
 
-        if success:
-            self.status_message.emit("Playlist-Reihenfolge aktualisiert.")
-        else:
-            self.status_message.emit("Reihenfolge konnte nicht gespeichert werden.")
+    # --- Qt event override for async callback events ----------------------
+    def event(self, ev: QEvent) -> bool:  # type: ignore[override]
+        if isinstance(ev, _AsyncCallbackEvent):  # custom async completion
+            try:
+                ev.invoke()
+            except Exception as exc:  # pragma: no cover - defensive
+                try:
+                    self.status_message.emit(f"Async Callback Fehler: {exc}")
+                except Exception:
+                    pass
+            return True
+        return super().event(ev)
 
-        self._refresh_playlist_items(self._current_playlist_id)
+# --- helper event type for background future completions ------------------
+class _AsyncCallbackEvent(QEvent):
+    EVENT_TYPE = QEvent.Type(QEvent.registerEventType())
 
-        if selected_paths and self.playlist_items_table is not None:
-            selection_model = self.playlist_items_table.selectionModel()
-            if selection_model is not None:
-                selection_model.clearSelection()
-            for row in range(self.playlist_items_table.rowCount()):
-                item = self.playlist_items_table.item(row, 0)
-                if item is None:
-                    continue
-                path_value = item.data(self.PATH_ROLE)
-                if isinstance(path_value, str) and path_value in selected_paths:
-                    self.playlist_items_table.selectRow(row)
+    def __init__(self, callback, future):  # type: ignore[no-untyped-def]
+        super().__init__(self.EVENT_TYPE)
+        self._callback = callback
+        self._future = future
 
-        self._update_playlist_controls_state()
+    def invoke(self):  # type: ignore[no-untyped-def]
+        # Only invoke provided callback; UI updates happen in widget context.
+        self._callback(self._future)
 
     def _on_playlist_player_closed(self) -> None:
         self._playlist_player_window = None
@@ -5466,6 +4369,18 @@ class MediaLibraryPlugin(BasePlugin):
             self._watch_enabled = bool(stored_watch)
         self._cover_cache = CoverCache(size=QSize(192, 192))
         self._log = logging.getLogger(__name__)
+        # Enrichment manager (online metadata augmentation). Cache stored under library dir.
+        try:
+            from .enrichment_manager import EnrichmentManager
+        except Exception:
+            EnrichmentManager = None  # type: ignore
+        self._enrichment_manager = None
+        if EnrichmentManager is not None:
+            cache_path = db_dir / "enrichment-cache.json"
+            try:
+                self._enrichment_manager = EnrichmentManager(cache_path)
+            except Exception as exc:
+                self._log.debug(f"Failed to init EnrichmentManager: {exc}")
 
     @property
     def manifest(self) -> PluginManifest:

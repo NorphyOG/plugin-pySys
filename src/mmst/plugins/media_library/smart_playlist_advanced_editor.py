@@ -22,6 +22,8 @@ _RULE_FIELDS = [
     ("kind", "Typ"),
     ("duration", "Dauer (s)"),
     ("mtime", "Geändert (Epoch)"),
+    ("age_days", "Alter (Tage)"),
+    ("filesize_mb", "Dateigröße (MB)"),
     ("genre", "Genre"),
     ("tags", "Tags"),
     ("title", "Titel"),
@@ -32,7 +34,9 @@ _FIELD_OPS = {
     "rating": [">=", "<=", "==", ">", "<"],
     "kind": ["==", "!=", "in", "not_contains"],
     "duration": [">=", "<=", ">", "<", "between"],
-    "mtime": [">=", "<=", ">", "<", "within_days"],
+    "mtime": [">=", "<=", ">", "<", "within_hours", "within_days", "within_weeks", "within_months"],
+    "age_days": [">=", "<=", ">", "<", "between"],
+    "filesize_mb": [">=", "<=", ">", "<", "between"],
     "genre": ["contains", "not_contains", "=="],
     "tags": ["has_tag", "contains", "not_contains"],
     "title": ["contains", "not_contains", "startswith", "endswith", "regex"],
@@ -194,7 +198,8 @@ class SmartPlaylistAdvancedEditor(QDialog):
         display = ["Regel", rule.field, rule.op, str(rule.value), ""]
         item = QTreeWidgetItem(display)
         item.setData(0, Qt.ItemDataRole.UserRole, ("rule", rule))
-        item.setFlags(item.flags() | Qt.ItemFlag.ItemIsSelectable | Qt.ItemFlag.ItemIsEnabled | Qt.ItemFlag.ItemIsEditable)
+        item.setFlags(item.flags() | Qt.ItemFlag.ItemIsSelectable | Qt.ItemFlag.ItemIsEnabled | Qt.ItemFlag.ItemIsEditable | Qt.ItemFlag.ItemIsUserCheckable)
+        item.setCheckState(4, Qt.CheckState.Checked if getattr(rule, 'negate', False) else Qt.CheckState.Unchecked)
         return item
 
     # --- Actions -----------------------------------------------------------
@@ -283,7 +288,7 @@ class SmartPlaylistAdvancedEditor(QDialog):
         """Serialize current playlist state to JSON string."""
         try:
             def serialize_rule(r: Rule) -> dict:
-                return {"field": r.field, "op": r.op, "value": r.value}
+                return {"field": r.field, "op": r.op, "value": r.value, "negate": getattr(r, 'negate', False)}
             
             def serialize_group(g: RuleGroup) -> dict:
                 return {
@@ -319,7 +324,7 @@ class SmartPlaylistAdvancedEditor(QDialog):
             
             # Restore group structure
             def deserialize_group(data: dict) -> RuleGroup:
-                rules = [Rule(field=r["field"], op=r["op"], value=r["value"]) for r in data.get("rules", [])]
+                rules = [Rule(field=r["field"], op=r["op"], value=r["value"], negate=r.get("negate", False)) for r in data.get("rules", [])]
                 groups = [deserialize_group(g) for g in data.get("groups", [])]
                 return RuleGroup(
                     match=data.get("match", "all"),
@@ -382,7 +387,7 @@ class SmartPlaylistAdvancedEditor(QDialog):
         try:
             # Serialize playlist structure to JSON for consistent hashing
             def serialize_rule(r: Rule) -> dict:
-                return {"field": r.field, "op": r.op, "value": r.value}
+                return {"field": r.field, "op": r.op, "value": r.value, "negate": getattr(r, 'negate', False)}
             
             def serialize_group(g: RuleGroup) -> dict:
                 return {
@@ -447,7 +452,7 @@ class SmartPlaylistAdvancedEditor(QDialog):
         if not payload:
             return
         kind, obj = payload
-        if kind == "group" and column == 4:
+        if column == 4 and kind in ("group", "rule"):
             obj.negate = item.checkState(4) == Qt.CheckState.Checked  # type: ignore[attr-defined]
             self._save_state()
             self._maybe_auto_preview()
@@ -468,6 +473,7 @@ class SmartPlaylistAdvancedEditor(QDialog):
             kind, obj = payload
             if kind == "rule":
                 menu.addAction("Regel bearbeiten", lambda: self._edit_rule(obj))
+                menu.addAction("NOT toggeln", lambda: self._toggle_not(item))
             if kind == "group":
                 menu.addAction("AND/OR umschalten", self._toggle_group_mode)
                 menu.addAction("NOT toggeln", lambda: self._toggle_not(item))
@@ -482,11 +488,11 @@ class SmartPlaylistAdvancedEditor(QDialog):
         if not payload:
             return
         kind, obj = payload
-        if kind != "group":
+        if kind not in ("group", "rule"):
             return
         obj.negate = not getattr(obj, "negate", False)
         item.setCheckState(4, Qt.CheckState.Checked if obj.negate else Qt.CheckState.Unchecked)
-        # Keep label unchanged except maybe style in future
+        self._save_state()
         self._maybe_auto_preview()
 
     def _edit_rule(self, rule: Rule) -> None:
@@ -506,31 +512,20 @@ class SmartPlaylistAdvancedEditor(QDialog):
             if not ok2:
                 return
             value = [first, second]
-        elif op == "within_days":
-            # Offer quick macro options
-            macro, ok_macro = QInputDialog.getItem(
-                self, "Zeitspanne", "Wähle Makro oder 'Custom':",
-                ["Custom", "Heute", "Letzte 7 Tage", "Letzte 30 Tage", "Dieses Jahr"],
-                0, False
-            )
-            if not ok_macro:
+        elif op.startswith("within_"):
+            # Generic numeric capture for relative time operators
+            if op == "within_hours":
+                label = "Stunden"; default = 2; maximum = 24 * 60
+            elif op == "within_days":
+                label = "Tage"; default = 7; maximum = 3650
+            elif op == "within_weeks":
+                label = "Wochen"; default = 4; maximum = 520
+            else:  # within_months
+                label = "Monate"; default = 6; maximum = 240
+            quantity, okq = QInputDialog.getInt(self, op, f"Anzahl {label}:", default, 1, maximum, 1)
+            if not okq:
                 return
-            if macro == "Heute":
-                value = 1
-            elif macro == "Letzte 7 Tage":
-                value = 7
-            elif macro == "Letzte 30 Tage":
-                value = 30
-            elif macro == "Dieses Jahr":
-                # Calculate days since Jan 1 of current year
-                now = datetime.now()
-                start_of_year = datetime(now.year, 1, 1)
-                value = (now - start_of_year).days + 1
-            else:  # Custom
-                days, okd = QInputDialog.getInt(self, "Within Days", "Tage:", 7, 1, 3650, 1)
-                if not okd:
-                    return
-                value = days
+            value = quantity
         else:
             text, okv = QInputDialog.getText(self, "Wert", "Wert:", text=str(rule.value) if rule.value is not None else "")
             if not okv:

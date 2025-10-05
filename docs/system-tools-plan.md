@@ -257,3 +257,51 @@ Risiken & Mitigation:
     - AudioTools: Echtzeit-Spektrum-Analyzer (FFT-basiert)
     - Core: EventBus für Plugin-übergreifende Kommunikation
   - 🔜 Nächster Meilenstein: Unit Tests für neue Features und Performance-Optimierungen.
+
+---
+
+## 8. Offene / Fehlende Funktionen (Aktualisierung)
+
+Diese Übersicht fasst fehlende oder teils entfernte/geplante Funktionen zusammen, damit ihr Status im Plan wieder klar als "nicht erledigt" markiert ist. (Nur Ergänzung – vorhandene Abschnitte oben bleiben unverändert.)
+
+### MediaLibrary
+- [ ] Erweiterte Playlist-Verwaltung (verbesserte UI – Drag & Drop, Multi-Select Operationen)
+- [ ] Automatisierungs-Features (Tag-Generierung aus Pfaden / Batch-Regeln)
+- [ ] Online-Metadaten-Enrichment (Provider-Integration + UI-Button / Kandidatenauswahl)
+- [ ] Smart Playlists Phase 3 (Drag & Drop Reordering, relative Zeitregeln, Inline-Bearbeitung von Feld/Operator/Wert, erweiterte NOT-Regeln auf Regel-Ebene)
+- [ ] Performance: Delta-Reevaluation & inkrementeller Smart-Playlist-Cache
+- [ ] UI: Live Inline-Vorschau (Top-N Treffer) während Smart-Playlist-Regelbearbeitung
+
+### AudioTools
+- [ ] Windows Backend via `pycaw` (vollständige Implementierung)
+- [ ] Linux Backend via `pulsectl`
+- [ ] Hot-Plug-Erkennung der Audiogeräte
+- [ ] Gerätespezifische EQ-Presets (Persistenz je Gerät)
+- [ ] Aufnahme-Timer (geplante Start/Stop Zeiten)
+- [ ] Zusätzliche DSP-Effekte: Noise Gate & Kompressor
+
+### FileManager
+- [ ] Duplikat-Scanner: Alternative Scan-Methoden (Nur Dateiname / Metadaten-Ähnlichkeit)
+- [ ] Duplikat-Scanner: Erweiterte intelligente Auswahl (Mehr Auto-Select Strategien)
+- [ ] Backup: Ausführungszeit (z.B. täglich 02:00) statt Intervall ab Erstellung
+- [ ] Backup: Mehrere Zeitpläne pro Profil + Übersichtsliste
+- [ ] Backup: Throttle/Retry & E-Mail/Webhook Integration
+
+### SystemTools
+- [ ] Temp Cleaner: Altersfilter UI (statt nur Parameter)
+- [ ] Temp Cleaner: Größenfilter & Ausschlussmuster
+- [ ] Temp Cleaner: Fortschrittsanzeige für tiefe Scans
+- [ ] Temp Cleaner: Konfigurierbare Custom-Kategorien (UI + Persistenz)
+- [ ] Image Tools: JXL-Unterstützung (Recherche + Konverter)
+- [ ] Bild-Komprimierer UI (Vorher/Nachher, Qualitäts-Slider)
+- [ ] Fan Control (Recherche & sichere Abstraktion) – weiterhin zurückgestellt
+
+### Cross-Cutting / Core
+- [ ] Erweiterte Workflows & Automation Chains (Plugin-übergreifend)
+- [ ] Scripting-Schnittstelle für Power-User
+- [ ] Online-Scraper (TheMovieDB / MusicBrainz) – Evaluierung + Proof-of-Concept
+- [ ] Calibre-Integration (schreibgeschützte E‑Book Ansicht) – Analyse `metadata.db`
+
+---
+
+Hinweis: Diese Sektion dient als Delta-Liste. Wenn einzelne Punkte umgesetzt werden, sollten sie in die jeweiligen Plugin-Abschnitte nach oben verschoben und hier entfernt werden.

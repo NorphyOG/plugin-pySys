@@ -89,6 +89,22 @@ class MediaMetadata:
     # Timestamps
     date_added: Optional[datetime] = None
     date_modified: Optional[datetime] = None
+
+    # Enrichment / external metadata (optional, filled by online scrapers)
+    # External identifiers
+    musicbrainz_track_id: Optional[str] = None
+    musicbrainz_release_id: Optional[str] = None
+    tmdb_id: Optional[str] = None  # For movies/TV
+    imdb_id: Optional[str] = None  # For cross-reference
+
+    # Original / canonical titles & extended descriptions
+    original_title: Optional[str] = None
+    overview: Optional[str] = None  # Longer plot/album/track overview fetched externally
+
+    # Provenance
+    enrichment_sources: List[str] = field(default_factory=list)  # Providers that contributed
+    enrichment_fetched_at: Optional[datetime] = None  # Last successful enrichment timestamp
+    enrichment_confidence: Optional[float] = None  # 0..1 aggregated confidence score
     
     def to_dict(self) -> Dict[str, Any]:
         """Convert to dictionary for storage."""
@@ -122,6 +138,16 @@ class MediaMetadata:
             "tags": self.tags,
             "date_added": self.date_added.isoformat() if self.date_added else None,
             "date_modified": self.date_modified.isoformat() if self.date_modified else None,
+            # Enrichment fields (persisted but optional)
+            "musicbrainz_track_id": self.musicbrainz_track_id,
+            "musicbrainz_release_id": self.musicbrainz_release_id,
+            "tmdb_id": self.tmdb_id,
+            "imdb_id": self.imdb_id,
+            "original_title": self.original_title,
+            "overview": self.overview,
+            "enrichment_sources": self.enrichment_sources,
+            "enrichment_fetched_at": self.enrichment_fetched_at.isoformat() if self.enrichment_fetched_at else None,
+            "enrichment_confidence": self.enrichment_confidence,
         }
 
 

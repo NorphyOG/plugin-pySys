@@ -1,12 +1,14 @@
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field as dataclass_field
+import uuid
 from pathlib import Path
 from typing import Any, Callable, Iterable, List, Sequence, Dict, Optional
 import json
 import operator
 import re
 import time
+from math import floor
 
 __all__ = [
     "Rule",
@@ -45,6 +47,16 @@ _OPS: Dict[str, Callable[[Any, Any], bool]] = {
     "within_days": lambda a, b: (
         a is not None and isinstance(b, (int, float)) and b >= 0 and _coerce_epoch(a) >= (time.time() - (b * 86400))
     ),
+    # New relative time granularities (Phase 3)
+    "within_hours": lambda a, b: (
+        a is not None and isinstance(b, (int, float)) and b >= 0 and _coerce_epoch(a) >= (time.time() - (b * 3600))
+    ),
+    "within_weeks": lambda a, b: (
+        a is not None and isinstance(b, (int, float)) and b >= 0 and _coerce_epoch(a) >= (time.time() - (b * 604800))
+    ),
+    "within_months": lambda a, b: (
+        a is not None and isinstance(b, (int, float)) and b >= 0 and _coerce_epoch(a) >= (time.time() - (b * 2629800))  # ~30.44 days
+    ),
 }
 
 # Fields allowed from MediaFile + metadata
@@ -64,24 +76,38 @@ _ALLOWED_FIELDS = {
     "resolution",
     "bitrate",
     "tags",
+    # Derived (Phase 3)
+    "age_days",        # computed from now - mtime
+    "filesize_mb",     # computed from size
 }
 
 
 @dataclass
 class Rule:
+    """A single comparison rule.
+
+    New in Phase 3:
+      - negate: invert result of this individual rule.
+      - uid: stable identifier for UI tree operations & undo/redo.
+    Both fields are optional in persisted JSON (added on migration if missing).
+    """
+
     field: str
     op: str
     value: Any
+    negate: bool = False
+    uid: str = dataclass_field(default_factory=lambda: uuid.uuid4().hex[:8])
 
     def matches(self, value_provider: Callable[[str], Any]) -> bool:
         if self.field not in _ALLOWED_FIELDS:
-            return False
+            return False ^ self.negate  # preserve negate semantics even for invalid field
         left = value_provider(self.field)
         func = _OPS.get(self.op)
         if not func:
-            return False
+            return False ^ self.negate
         # Attempt light type coercion for numeric comparisons
         numeric_ops = {">", ">=", "<", "<=", "between"}
+        result: bool
         if self.op in numeric_ops:
             try:
                 if isinstance(left, str) and left.replace(".", "", 1).isdigit():
@@ -95,22 +121,24 @@ class Rule:
                             high = float(high)
                         self_value = (low, high)
                     else:
-                        return False
+                        return False ^ self.negate
                 else:
                     self_value = self.value
                     if isinstance(self_value, str) and self_value.replace(".", "", 1).isdigit():
                         self_value = float(self_value)
                 # Overwrite value used in func call if we coerced
                 if self.op == "between":
-                    return bool(func(left, (self_value[0], self_value[1])))  # type: ignore[index]
+                    result = bool(func(left, (self_value[0], self_value[1])))  # type: ignore[index]
                 else:
-                    return bool(func(left, self_value))
+                    result = bool(func(left, self_value))
             except Exception:
-                return False
-        try:
-            return bool(func(left, self.value))
-        except Exception:
-            return False
+                result = False
+        else:
+            try:
+                result = bool(func(left, self.value))
+            except Exception:
+                result = False
+        return (not result) if self.negate else result
 
 
 def _coerce_epoch(value: Any) -> float:
@@ -137,50 +165,67 @@ class RuleGroup:
 
     match: 'all' -> AND, 'any' -> OR
     negate: when True, the result of the group is inverted.
+    uid: stable identifier for UI operations.
     """
+
     match: str = "all"
     negate: bool = False
-    rules: List[Rule] = field(default_factory=list)
-    groups: List["RuleGroup"] = field(default_factory=list)
+    rules: List[Rule] = dataclass_field(default_factory=list)
+    groups: List["RuleGroup"] = dataclass_field(default_factory=list)
+    uid: str = dataclass_field(default_factory=lambda: uuid.uuid4().hex[:8])
 
     def to_dict(self) -> Dict[str, Any]:
         return {
             "match": self.match,
             "negate": self.negate or False,
+            "uid": self.uid,
             "rules": [r.__dict__ for r in self.rules],
             "groups": [g.to_dict() for g in self.groups] if self.groups else [],
         }
 
     @staticmethod
     def from_dict(data: Dict[str, Any]) -> "RuleGroup":
-        rules = [Rule(**rd) for rd in data.get("rules", []) if isinstance(rd, dict)]
-        groups = [RuleGroup.from_dict(gd) for gd in data.get("groups", []) if isinstance(gd, dict)]
+        rules: List[Rule] = []
+        for rd in data.get("rules", []):
+            if isinstance(rd, dict):
+                # Backward compatibility: assign uid/negate defaults if not present
+                if "uid" not in rd:
+                    rd["uid"] = uuid.uuid4().hex[:8]
+                if "negate" not in rd:
+                    rd["negate"] = False
+                try:
+                    rules.append(Rule(**rd))
+                except TypeError:
+                    # If old schema contains unexpected keys ignore this rule gracefully
+                    pass
+        groups: List[RuleGroup] = []
+        for gd in data.get("groups", []):
+            if isinstance(gd, dict):
+                groups.append(RuleGroup.from_dict(gd))
+        uid = data.get("uid") or uuid.uuid4().hex[:8]
         return RuleGroup(
             match=data.get("match", "all"),
             negate=bool(data.get("negate", False)),
             rules=rules,
             groups=groups,
+            uid=uid,
         )
 
     def evaluate(self, value_provider: Callable[[str], Any]) -> bool:
         rule_results = [r.matches(value_provider) for r in self.rules]
         group_results = [g.evaluate(value_provider) for g in self.groups]
-        # If both empty -> neutral True (so parent can still AND)
         combined = rule_results + group_results
         if not combined:
-            result = True
+            result = True  # neutral element for AND chains
         else:
-            if self.match == "any":
-                result = any(combined)
-            else:
-                result = all(combined)
+            result = any(combined) if self.match == "any" else all(combined)
         return (not result) if self.negate else result
 
 
 @dataclass
 class SmartPlaylist:
     name: str
-    rules: List[Rule] = field(default_factory=list)  # legacy flat rules
+    rules: List[Rule] = dataclass_field(default_factory=list)  # legacy flat rules
     match: str = "all"  # legacy top-level match for flat rules
     limit: Optional[int] = None
     sort: Optional[str] = None  # reuse existing sort keys if provided
@@ -276,6 +321,22 @@ def evaluate_smart_playlist(
         metadata = metadata_provider(abs_path)
 
         def value_provider(field: str) -> Any:
+            # Derived fields first
+            if field == "age_days":
+                mt = getattr(media, "mtime", None)
+                ep = _coerce_epoch(mt)
+                if ep == 0.0:
+                    return None
+                return floor((time.time() - ep) / 86400)
+            if field == "filesize_mb":
+                sz = getattr(media, "size", None)
+                try:
+                    if isinstance(sz, str) and sz.isdigit():
+                        sz = int(sz)
+                    if isinstance(sz, (int, float)):
+                        return round(float(sz) / (1024 * 1024), 2)
+                except Exception:
+                    return None
             if hasattr(media, field):
                 return getattr(media, field)
             if hasattr(metadata, field):
