@@ -17,7 +17,77 @@ Requires-Dist: pymediainfo>=6.0
 Provides-Extra: dev
 Requires-Dist: pytest>=8.2; extra == "dev"
 
-# Modular Media & System Toolkit (MMST)
+# MMST Dashboard – Modulare Python-Anwendung
+
+## Highlights (Oktober 2025)
+
+- **🎯 Globales Progress-System:** Zentraler Fortschritts-Dialog für alle Plugins mit Multi-Task-Support
+- **🐛 Debug-Console:** Echtzeit-Log-Viewer in Einstellungen mit Filterung und Farbcodierung
+- **⏰ Scheduled Backups:** Automatische Zeitplanung für FileManager-Backups (Stündlich/Täglich/Wöchentlich/Monatlich)
+- **🖼️ Image Compression Tool:** Visueller Vergleich vor/nach Kompression mit Quality-Slider
+- **📊 Gallery Performance:** Optimiert für 10k+ Dateien mit Chunked-Loading & Binary-Search
+- **Sitzungspersistenz:** Dashboard merkt sich Fenstergröße, aktives Plugin und Filter-Einstellungen
+- **MediaLibrary Iteration 5:** Inline-Bewertungen, Custom Presets, Batch-Aktionen, Player-Integration
+
+## Recent Updates (Next Big Update v2)
+
+**7 Major Features Implementiert** – Das "Next Big Update" bringt umfangreiche Erweiterungen über alle Plugins:
+
+### 🎵 MediaLibrary: Statistik-Dashboard
+
+- **Visual Analytics:** Neue Dashboard-Ansicht mit Statistik-Karten (Dateien, Größe, Bewertungen)
+- **Genre- & Artist-Charts:** Horizontale Bar-Charts zeigen Top 10 Verteilungen
+- **Temporale Stats:** "Letzte 7 Tage"-Filter für hinzugefügte Dateien und durchschnittliche Bewertungen
+- **Event-Integration:** Reagiert automatisch auf `files.deleted` und `files.converted` Events
+
+### 📁 FileManager: Intelligente Duplikat-Auswahl, Backup-Profile & Zeitgesteuerte Backups
+
+- **Smart Selection (4 Modi):**
+  - *Älteste behalten:* Wählt neuere Duplikate zum Löschen aus
+  - *Kleinste behalten:* Markiert größere Varianten
+  - *Nach Ordner filtern:* Zeigt nur Duplikate in bestimmtem Pfad
+  - *Alle abwählen:* Reset für manuelle Nachbearbeitung
+- **Backup-Profile:** Speichern & Laden häufig genutzter Backup-Konfigurationen (JSON-basiert)
+- **Dry-Run-Modus:** Zeigt exakt, welche Dateien kopiert/gelöscht würden – ohne Ausführung
+- **⏰ Scheduled Backups:** Automatische Backups mit QTimer (Stündlich/Täglich/Wöchentlich/Monatlich)
+  - Profile-basierte Zeitplanung mit nächstem Laufzeitpunkt
+  - Hintergrund-Ausführung mit Benachrichtigungen
+  - Persistente Konfiguration über App-Neustarts
+
+### 🔧 SystemTools: Batch-Warteschlange & Conversion-Presets
+
+- **Batch-Queue:** Multi-File-Warteschlange mit sequentieller Verarbeitung
+- **Fortschrittsanzeige:** Pro-Datei-Status und Gesamt-Fortschrittsbalken
+- **Conversion-Presets:** Speichern häufiger Format-Kombinationen (z. B. "MP4 zu GIF", "WAV zu MP3 192kbit")
+- **Event-Emission:** Sendet `files.converted` Events für MediaLibrary-Integration
+
+### 🎚️ AudioTools: Echtzeit-Spektrum-Analyzer
+
+- **FFT-basierte Visualisierung:** 10-Band-Frequenzanzeige (31 Hz – 16 kHz)
+- **Color-Coded Bars:** Grün (niedrig) → Gelb (mittel) → Rot (Spitzen)
+- **Auto-Start/Stop:** Synchronisiert automatisch mit EQ-Engine-Status
+- **Graceful Degradation:** Optionale Dependencies (numpy/sounddevice) werden sauber behandelt
+
+### 🔌 Core: EventBus-System
+
+- **Plugin-Kommunikation:** Pub/Sub-Architektur für lose gekoppelte Plugin-Interaktion
+- **Thread-Safe:** RLock-basierte Synchronisation für Concurrent Access
+- **Error Isolation:** Fehlerhafte Subscriber beeinträchtigen andere nicht
+- **Events:**
+  - `files.deleted` – FileManager → MediaLibrary (automatisches Index-Update)
+  - `files.converted` – SystemTools → MediaLibrary (Benachrichtigung über neue Dateien)
+
+### 📊 Technische Details
+
+- **Neue Dateien:** `src/mmst/core/events.py`, `src/mmst/plugins/media_library/statistics_dashboard.py`, `src/mmst/plugins/audio_tools/spectrum_analyzer.py`
+- **Modifizierte Module:** 6 Plugin-Dateien erweitert (MediaLibrary, FileManager, SystemTools, AudioTools)
+- **Code-Umfang:** ~1500 neue Zeilen über 3 neue + 6 modifizierte Dateien
+- **Tests:** Unit Tests für EventBus, Backup Dry-Run, und Batch Queue
+- **Persistierung:** JSON-basierte Profile/Presets in Plugin-Config-Verzeichnissen
+
+Siehe `NEXT_BIG_UPDATE_SUMMARY.md` für detaillierte Feature-Beschreibungen und Verwendungsbeispiele.
+
+## Architektur im Überblickia & System Toolkit (MMST)
 
 MMST ist ein modulares Dashboard, das ein gemeinsames Core-System mit spezialisierten Plugins kombiniert.
 Der Core verwaltet Lebenszyklus, Benutzeroberfläche und gemeinsame Dienste, während Plugins einzelne Werkzeuge

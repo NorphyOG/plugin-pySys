@@ -2,10 +2,10 @@ from __future__ import annotations
 
 import concurrent.futures
 from pathlib import Path
-from typing import Dict, List, Optional
-
-from PySide6.QtCore import Qt, Signal  # type: ignore[import-not-found]
-from PySide6.QtWidgets import (  # type: ignore[import-not-found]
+from typing import Callable, Dict, List, Optional
+import time
+from PySide6.QtCore import Qt, Signal, QTimer
+from PySide6.QtWidgets import (
     QComboBox,
     QFileDialog,
     QFormLayout,
@@ -27,7 +27,8 @@ from PySide6.QtWidgets import (  # type: ignore[import-not-found]
 from ...core.plugin_base import BasePlugin, PluginManifest
 from .converter import ConversionJob, ConversionResult, FileConverter
 from .image_compression import ImageCompressionWidget
-from .disk_monitor import DiskMonitorWidget
+from .disk_monitor import DiskMonitorWidget, DiskMonitor
+from .temp_cleaner import TempCleaner, ScanResult
 from .tools import CONVERSION_FORMATS, Tool, ToolDetector, get_supported_formats, infer_format
 
 
@@ -617,10 +618,16 @@ class SystemToolsPlugin(BasePlugin):
         self._batch_widget: Optional[BatchQueueWidget] = None
         self._compression_widget: Optional[ImageCompressionWidget] = None
         self._disk_monitor_widget: Optional[DiskMonitorWidget] = None
+        # Temp cleaner components
+        self._temp_cleaner_widget: Optional[QWidget] = None
+        self._temp_cleaner_backend = TempCleaner()
+        self._temp_cleaner_last_scan: Optional[ScanResult] = None
+
         self._executor = concurrent.futures.ThreadPoolExecutor(max_workers=2)
         self._active = False
         self._detector = ToolDetector()
         self._converter = FileConverter()
+        self._disk_monitor_timer: Optional[QTimer] = None
 
     @property
     def manifest(self) -> PluginManifest:
@@ -651,6 +658,13 @@ class SystemToolsPlugin(BasePlugin):
             self._disk_monitor_widget = DiskMonitorWidget()
             self._disk_monitor_widget.set_enabled(self._active)
             self._widget.addTab(self._disk_monitor_widget, "💾 Disk Monitor")
+
+            # Create temp cleaner tab
+            self._temp_cleaner_widget = self._create_temp_cleaner_tab()
+            self._temp_cleaner_widget.setEnabled(self._active)
+            self._widget.addTab(self._temp_cleaner_widget, "🧹 Temp Cleaner")
+            # Restore persisted temp cleaner state
+            self._restore_temp_cleaner_state()
         
         return self._widget
 
@@ -664,6 +678,10 @@ class SystemToolsPlugin(BasePlugin):
             self._compression_widget.set_enabled(True)
         if self._disk_monitor_widget:
             self._disk_monitor_widget.set_enabled(True)
+        if self._temp_cleaner_widget:
+            self._temp_cleaner_widget.setEnabled(True)
+        
+        self._start_monitoring()
 
     def stop(self) -> None:
         self._active = False
@@ -675,9 +693,61 @@ class SystemToolsPlugin(BasePlugin):
             self._compression_widget.set_enabled(False)
         if self._disk_monitor_widget:
             self._disk_monitor_widget.set_enabled(False)
+        if self._temp_cleaner_widget:
+            self._temp_cleaner_widget.setEnabled(False)
+            
+        self._stop_monitoring()
+        # Persist temp cleaner state
+        self._persist_temp_cleaner_state()
 
     def shutdown(self) -> None:
         self._executor.shutdown(wait=False)
+        self._stop_monitoring()
+
+    def _start_monitoring(self):
+        """Start the background disk monitoring timer."""
+        if self._disk_monitor_timer is None:
+            self._disk_monitor_timer = QTimer()
+            self._disk_monitor_timer.timeout.connect(self._check_disk_health)
+            # Check every 15 minutes
+            self._disk_monitor_timer.start(15 * 60 * 1000) 
+            # Also run once on startup
+            self._check_disk_health()
+
+    def _stop_monitoring(self):
+        """Stop the background disk monitoring timer."""
+        if self._disk_monitor_timer:
+            self._disk_monitor_timer.stop()
+            self._disk_monitor_timer = None
+
+    def _check_disk_health(self):
+        """Periodically check disk health and send notifications on issues."""
+        monitor = DiskMonitor()
+        if not monitor.is_available:
+            return
+
+        def check():
+            disks = monitor.get_disks()
+            for disk in disks:
+                summary = monitor.get_health_summary(disk.index)
+                status = summary.get("status")
+
+                if status == "CRITICAL":
+                    message = f"Kritisches Problem bei Festplatte {disk.model}: {', '.join(summary.get('critical', []))}"
+                    self.services.send_notification(
+                        message,
+                        level="critical",
+                        source=self.IDENTIFIER
+                    )
+                elif status == "WARNING":
+                    message = f"Warnung bei Festplatte {disk.model}: {', '.join(summary.get('warnings', []))}"
+                    self.services.send_notification(
+                        message,
+                        level="warning",
+                        source=self.IDENTIFIER
+                    )
+        
+        self._executor.submit(check)
 
     # Tool detection
     def detect_tools(self) -> Dict[str, Tool]:
@@ -737,6 +807,183 @@ class SystemToolsPlugin(BasePlugin):
                 self._converter_widget.conversion_finished.emit(result.success, result.message)
 
         future.add_done_callback(_done)
+
+    # -------------------- Temp Cleaner --------------------
+    def _create_temp_cleaner_tab(self) -> QWidget:
+        widget = QWidget()
+        layout = QVBoxLayout(widget)
+        layout.setContentsMargins(8, 8, 8, 8)
+        layout.setSpacing(8)
+
+        # Category list
+        category_group = QGroupBox("Kategorien")
+        cat_layout = QVBoxLayout(category_group)
+        from PySide6.QtWidgets import QCheckBox
+        self._temp_cat_checkboxes: Dict[str, QCheckBox] = {}
+        for key, display in self._temp_cleaner_backend.list_categories():
+            cb = QCheckBox(display)
+            cb.setChecked(True)
+            self._temp_cat_checkboxes[key] = cb
+            cat_layout.addWidget(cb)
+        layout.addWidget(category_group)
+
+        # Buttons
+        button_row = QHBoxLayout()
+        self._temp_scan_button = QPushButton("Scannen")
+        self._temp_scan_button.clicked.connect(self._run_temp_scan)
+        button_row.addWidget(self._temp_scan_button)
+        self._temp_delete_button = QPushButton("Löschen (Dry Run)")
+        self._temp_delete_button.clicked.connect(lambda: self._run_temp_delete(dry_run=True))
+        self._temp_delete_button.setEnabled(False)
+        button_row.addWidget(self._temp_delete_button)
+        self._temp_delete_real_button = QPushButton("Löschen (Echt)")
+        self._temp_delete_real_button.clicked.connect(lambda: self._run_temp_delete(dry_run=False))
+        self._temp_delete_real_button.setEnabled(False)
+        button_row.addWidget(self._temp_delete_real_button)
+        button_row.addStretch()
+        layout.addLayout(button_row)
+
+        # Summary + log
+        self._temp_summary_label = QLabel("Noch kein Scan durchgeführt.")
+        layout.addWidget(self._temp_summary_label)
+        self._temp_log = QPlainTextEdit()
+        self._temp_log.setReadOnly(True)
+        self._temp_log.setMaximumBlockCount(1000)
+        layout.addWidget(self._temp_log, stretch=1)
+
+        return widget
+
+    def _selected_temp_categories(self) -> List[str]:
+        return [k for k, cb in self._temp_cat_checkboxes.items() if cb.isChecked()]
+
+    def _run_temp_scan(self) -> None:
+        if not self._active:
+            return
+        cats = self._selected_temp_categories()
+        self._temp_log.appendPlainText(f"🔍 Starte Scan für {len(cats)} Kategorien...")
+        self._temp_scan_button.setEnabled(False)
+
+        def do_scan():
+            result = self._temp_cleaner_backend.scan(selected_categories=cats)
+            return result
+
+        future = self._executor.submit(do_scan)
+
+        def done(f: concurrent.futures.Future[ScanResult]):
+            try:
+                self._temp_cleaner_last_scan = f.result()
+            except Exception as exc:
+                self._temp_log.appendPlainText(f"❌ Scan fehlgeschlagen: {exc}")
+            else:
+                sr = self._temp_cleaner_last_scan
+                if sr:
+                    self._temp_summary_label.setText(
+                        f"{sr.total_files} Dateien, Gesamtgröße: {self._format_size(sr.total_size)} in {len(sr.categories)} Kategorien (Dauer {sr.duration_seconds:.2f}s)"
+                    )
+                    for key, cat in sr.categories.items():
+                        self._temp_log.appendPlainText(
+                            f"[{cat.display}] {len(cat.files)} Dateien, {self._format_size(cat.total_size)}"
+                        )
+                    self._temp_delete_button.setEnabled(sr.total_files > 0)
+                    self._temp_delete_real_button.setEnabled(sr.total_files > 0)
+                    # Persist summary
+                    self._persist_temp_cleaner_state(summary_only=True)
+            finally:
+                self._temp_scan_button.setEnabled(True)
+
+        future.add_done_callback(lambda f: done(f))
+
+    def _run_temp_delete(self, dry_run: bool) -> None:
+        if not self._active or not self._temp_cleaner_last_scan:
+            return
+        scan = self._temp_cleaner_last_scan
+        self._temp_log.appendPlainText("🧹 Lösche Dateien..." + (" (Dry Run)" if dry_run else ""))
+        self._temp_delete_button.setEnabled(False)
+        self._temp_delete_real_button.setEnabled(False)
+
+        cats = self._selected_temp_categories()
+
+        def do_delete():
+            return self._temp_cleaner_backend.delete(scan, dry_run=dry_run, categories=cats)
+
+        future = self._executor.submit(do_delete)
+
+        def done(f: concurrent.futures.Future[dict]):
+            try:
+                report = f.result()
+            except Exception as exc:
+                self._temp_log.appendPlainText(f"❌ Löschen fehlgeschlagen: {exc}")
+            else:
+                total_removed = 0
+                total_size = 0
+                for key, stats in report.items():
+                    cat = scan.categories.get(key)
+                    if not cat:
+                        continue
+                    removed_files = stats['files']
+                    removed_size = stats['size']
+                    total_removed += removed_files
+                    total_size += removed_size
+                    self._temp_log.appendPlainText(
+                        f"[{cat.display}] Entfernt: {removed_files} Dateien, {self._format_size(removed_size)} {'(Dry Run)' if dry_run else ''}"
+                    )
+                self._temp_log.appendPlainText(
+                    f"Gesamt entfernt: {total_removed} Dateien, {self._format_size(total_size)} {'(Dry Run)' if dry_run else ''}"
+                )
+                if not dry_run:
+                    # Re-run scan automatically to refresh view
+                    self._run_temp_scan()
+                else:
+                    self._temp_delete_real_button.setEnabled(total_removed > 0)
+                # Persist after delete
+                self._persist_temp_cleaner_state(summary_only=True)
+            finally:
+                self._temp_delete_button.setEnabled(True)
+                if dry_run:
+                    self._temp_delete_real_button.setEnabled(True)
+
+        future.add_done_callback(lambda f: done(f))
+
+    def _format_size(self, size: int) -> str:
+        units = ["B", "KB", "MB", "GB", "TB"]
+        value = float(size)
+        for unit in units:
+            if value < 1024.0:
+                return f"{value:.2f} {unit}"
+            value /= 1024.0
+        return f"{value:.2f} PB"
+
+    # -------------------- Persistence (Temp Cleaner) --------------------
+    def _persist_temp_cleaner_state(self, summary_only: bool = False) -> None:
+        try:
+            cfg = self.services.get_plugin_config(self.IDENTIFIER) or {}
+            if not summary_only:
+                cfg['temp_cleaner.selected_categories'] = self._selected_temp_categories()
+            if self._temp_cleaner_last_scan:
+                cfg['temp_cleaner.last_summary'] = {
+                    'total_files': self._temp_cleaner_last_scan.total_files,
+                    'total_size': self._temp_cleaner_last_scan.total_size,
+                    'timestamp': time.time(),
+                }
+            # Ensure we pass a plain dict (some services may return custom mapping)
+            self.services.save_plugin_config(self.IDENTIFIER, dict(cfg))
+        except Exception:
+            pass
+
+    def _restore_temp_cleaner_state(self) -> None:
+        try:
+            cfg = self.services.get_plugin_config(self.IDENTIFIER) or {}
+            selected = set(cfg.get('temp_cleaner.selected_categories', []))
+            if selected and hasattr(self, '_temp_cat_checkboxes'):
+                for key, cb in self._temp_cat_checkboxes.items():
+                    cb.setChecked(key in selected)
+            last = cfg.get('temp_cleaner.last_summary')
+            if last:
+                self._temp_summary_label.setText(
+                    f"Letzter Scan: {last.get('total_files', 0)} Dateien, {self._format_size(last.get('total_size', 0))}"
+                )
+        except Exception:
+            pass
     
     def run_batch_queue(self, jobs: List[ConversionJob]) -> None:
         """Process a batch queue of conversion jobs sequentially."""
@@ -837,7 +1084,7 @@ class SystemToolsPlugin(BasePlugin):
         target: Path,
         target_format: str,
         quality: int,
-        callback: Optional[callable] = None
+        callback: Optional[Callable[[], None]] = None
     ) -> None:
         """Run image compression with quality setting.
         
@@ -871,7 +1118,7 @@ class SystemToolsPlugin(BasePlugin):
                     source_format=source.suffix.lstrip("."),
                     target_format=target_format,
                     tool="imagemagick",
-                    command_path=imagemagick_tool.path
+                    command_path=Path(imagemagick_tool.path) if imagemagick_tool.path else None
                 )
                 
                 # Build ImageMagick command with quality setting

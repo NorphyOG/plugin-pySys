@@ -4,6 +4,7 @@ from __future__ import annotations
 import os
 from pathlib import Path
 from typing import Any, Dict, Tuple, List, cast
+import logging
 
 import pytest
 from PySide6.QtWidgets import QApplication
@@ -30,6 +31,7 @@ class DummyPlugin:
         self.custom_presets: Dict[str, Dict[str, Any]] = {}
         self.view_state: Dict[str, Any] = {}
         self.attributes: Dict[str, Tuple[Any, List[str]]] = {}
+        self._log = logging.getLogger("dummy_plugin")
 
     def list_recent_detailed(self):
         return list(self._entries)

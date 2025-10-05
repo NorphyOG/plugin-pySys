@@ -40,7 +40,8 @@ Das MMST soll eine plattformübergreifende (Windows & Linux) Python-Anwendung we
 
 4. **System-Werkzeuge & Konverter (In Arbeit):**
     - [x] Implementierung des `SystemTools` Plugins mit Dateikonverter (MVP).
-    - [ ] **(Als Nächstes)** Disk Integrity Monitor und erweiterte Features.
+    - [x] **(Abgeschlossen)** Disk Integrity Monitor implementiert (Windows & Linux).
+    - [ ] **(Als Nächstes)** Erweiterte Features.
 
 5. **(Neu) Advanced Integrations & Automation (In Arbeit):**
     - [x] **(Abgeschlossen)** Plugin-übergreifende Aktionen: EventBus-System für Pub/Sub-Kommunikation zwischen Plugins implementiert.
@@ -102,7 +103,11 @@ Das MMST soll eine plattformübergreifende (Windows & Linux) Python-Anwendung we
   - [x] UI, Backend, Fortschrittsanzeige und `send2trash` implementiert.
   - [x] **(Abgeschlossen)** Backup-Profile: Speichern und Laden von häufig genutzten Backup-Jobs (Quelle, Ziel, Mirror-Modus) via JSON-Persistierung.
   - [x] **(Abgeschlossen)** "Dry Run"-Modus: Vollständige Simulation mit [DRY RUN] Präfix in Logs, zeigt alle geplanten Operationen ohne Ausführung.
-  - [ ] **(Neu)** Zeitgesteuerte Backups: Integration eines Schedulers, um Backups täglich/wöchentlich auszuführen.
+  - [x] **(Neu)** Zeitgesteuerte Backups: Scheduler mit Intervallen (stündlich, täglich, wöchentlich, monatlich), UI-Konfiguration pro Profil, Persistenz (`backup_schedules.json`).
+  - [x] Concurrency Guard: Verhindert parallele manuelle & geplante Backups (Übersprungene Läufe werden geloggt & per Notification gemeldet).
+  - [ ] Erweiterung: Ausführungszeit (z.B. täglich 02:00) statt gleitendem Intervall ab Erstellung.
+  - [ ] Erweiterung: Mehrere Zeitpläne pro Profil + Übersichtsliste.
+  - [ ] Erweiterung: Throttle / Retry bei Fehlern & E-Mail/Hook-Integration.
 
 ---
 
@@ -213,11 +218,22 @@ Risiken & Mitigation:
   - [ ] **(Als Nächstes)** **JXL Image Tools:** Recherche und Einbindung einer `libjxl`-Python-Bibliothek für Konvertierung und Anzeige.
   - [ ] **(Neu)** **Bild-Komprimierer:** Eine dedizierte UI erstellen, um Bilder zu komprimieren, mit visuellem Vorher/Nachher-Vergleich und Qualitäts-Schieberegler.
 
-- **Feature: Disk Integrity Monitor**
-  - [ ] **(Als Nächstes)** **UI:** Zeigt eine Liste der Laufwerke mit S.M.A.R.T.-Status, Temperatur und Modell an.
-  - [ ] **(Als Nächstes)** **Windows Backend:** Verwendet `wmic` oder PowerShell.
-  - [ ] **(Als Nächstes)** **Linux Backend:** Verwendet `smartctl`.
-  - [ ] **(Neu)** Benachrichtigungen: Sende eine Systembenachrichtigung, wenn sich der Status eines Laufwerks auf "Warning" oder "Error" ändert.
+- **(Neu) Feature: Disk Integrity Monitor**
+- [x] Backend für Windows via WMI (`MSStorageDriver_FailurePredictData`) implementiert.
+- [x] Backend für Linux via `smartctl` implementiert.
+- [x] Plattform-agnostische Abstraktion (`DiskMonitorBase`) und Factory erstellt.
+- [x] UI-Widget zur Anzeige des Disk-Status integriert.
+- [x] Hintergrund-Überwachung mit Benachrichtigung bei kritischen Status-Änderungen.
+
+- **(Neu) Feature: Temporäre Dateien-Reiniger** (In Arbeit)
+  - [x] Backend `temp_cleaner.py` mit Kategorien & Scan / Delete API.
+  - [x] Kategorien: System Temp, Browser Caches (Windows) / User Cache (Linux), erweiterbar.
+  - [x] UI Tab (🧹 Temp Cleaner) mit Kategorie-Checkboxen, Scan & Delete (Dry Run / Echt) Buttons, Log & Summary.
+  - [x] Persistenz: Ausgewählte Kategorien + letzte Scan-Zusammenfassung werden gespeichert.
+  - [ ] Erweiterung: Altersfilter UI (aktuell nur Parameter `min_age_seconds` im Code nutzbar).
+  - [ ] Erweiterung: Größenfilter & Ausschlussmuster.
+  - [ ] Erweiterung: Fortschritts-Anzeige während tiefen Scans.
+  - [ ] Erweiterung: Konfigurierbare zusätzliche Custom-Kategorien via Config-Dialog.
 
 - **(Neu) Feature: Temporäre Dateien-Reiniger**
   - [ ] **UI:** Zeigt eine Liste von zu löschenden temporären Dateien gruppiert nach Kategorie (System-Cache, Browser-Cache, etc.) an.

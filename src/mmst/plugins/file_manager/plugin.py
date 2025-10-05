@@ -989,6 +989,7 @@ class FileManagerPlugin(BasePlugin):
         schedules_file = self.services.data_dir / "backup_schedules.json"
         self.scheduler = BackupScheduler(self.services, schedules_file)
         self.scheduler.schedule_triggered.connect(self._on_scheduled_backup)
+        self._backup_running = False
 
     @property
     def manifest(self) -> PluginManifest:
@@ -1078,6 +1079,18 @@ class FileManagerPlugin(BasePlugin):
                 self._widget.backup_completed.emit(False, "Plugin ist nicht aktiv.")
             return
 
+        # Concurrency guard
+        if self._backup_running:
+            self.services.send_notification(
+                "Ein Backup läuft bereits – neuer Auftrag verworfen.",
+                level="warning",
+                source=self.manifest.identifier,
+            )
+            if self._widget:
+                self._widget.backup_log_message.emit("⚠️ Übersprungen: Backup läuft bereits.")
+            return
+        self._backup_running = True
+
         logger = self.services.logger
 
         # Pre-calc total files in source tree for progress bar
@@ -1152,6 +1165,10 @@ class FileManagerPlugin(BasePlugin):
                 widget.backup_completed.emit(True, summary)
 
         future.add_done_callback(_handle_future)
+        
+        def _clear_flag(_f):  # always clear running flag after completion
+            self._backup_running = False
+        future.add_done_callback(_clear_flag)
     
     def _on_scheduled_backup(self, profile_name: str, schedule_id: str) -> None:
         """
@@ -1163,7 +1180,16 @@ class FileManagerPlugin(BasePlugin):
         """
         logger.info(f"Scheduled backup triggered: {profile_name} (schedule: {schedule_id})")
         
-        # Notify user
+        # Concurrency guard for scheduled backup
+        if self._backup_running:
+            self.services.send_notification(
+                f"Geplanter Backup-Lauf für '{profile_name}' übersprungen (anderes Backup aktiv)",
+                level="warning",
+                source=self.manifest.identifier
+            )
+            return
+
+        # Notify user (only if starting)
         self.services.send_notification(
             f"Automatisches Backup gestartet: {profile_name}",
             level="info",

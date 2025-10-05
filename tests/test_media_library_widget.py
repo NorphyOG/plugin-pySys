@@ -4,6 +4,7 @@ from __future__ import annotations
 import os
 from pathlib import Path
 from typing import Any, Dict, List, Tuple, cast
+import logging
 
 import pytest
 from PySide6.QtGui import QColor, QPixmap
@@ -39,6 +40,7 @@ class DummyPlugin:
         self.external_players: Dict[str, Dict[str, str]] = {}
         self.external_player_calls: List[Path] = []
         self.view_state: Dict[str, Any] = {}
+        self._log = logging.getLogger("dummy_plugin")
 
     def list_recent_detailed(self):
         return list(self._entries)

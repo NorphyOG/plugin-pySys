@@ -7,6 +7,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable
 
+import send2trash
+
 
 @dataclass
 class BackupResult:
@@ -107,7 +109,7 @@ def _mirror_cleanup(source: Path, target: Path, progress: ProgressCallback, dry_
                         removed += 1
                         progress(f"[DRY RUN] Würde löschen: {target_file}")
                     else:
-                        target_file.unlink()
+                        send2trash.send2trash(target_file)
                         removed += 1
                         progress(f"Gelöscht: {target_file}")
                 except Exception as exc:  # pragma: no cover - runtime failure surface
@@ -121,7 +123,7 @@ def _mirror_cleanup(source: Path, target: Path, progress: ProgressCallback, dry_
                         removed += 1
                         progress(f"[DRY RUN] Würde entfernen: {target_dir}")
                     else:
-                        shutil.rmtree(target_dir)
+                        send2trash.send2trash(target_dir)
                         removed += 1
                         progress(f"Verzeichnis entfernt: {target_dir}")
                 except Exception as exc:  # pragma: no cover - runtime failure surface
