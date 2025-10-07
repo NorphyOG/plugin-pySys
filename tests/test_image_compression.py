@@ -9,7 +9,7 @@ import pytest
 from pathlib import Path
 from unittest.mock import Mock, MagicMock, patch
 from mmst.plugins.system_tools.image_compression import (
-    ImageCompressionWidget,
+    DataCompressionWidget,
     CompressionPresetManager,
     ImagePreviewWidget
 )

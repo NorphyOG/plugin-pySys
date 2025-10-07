@@ -38,6 +38,7 @@ class TempFileEntry:
     mtime: float
     category: str
     removable: bool = True
+    is_directory: bool = False
 
     @property
     def age_seconds(self) -> float:
@@ -136,6 +137,7 @@ class TempCleaner:
                 if not root.exists():
                     continue
                 try:
+                    # First add files
                     for path in self._iter_files(root, follow_symlinks=follow_symlinks):
                         try:
                             st = path.stat()
@@ -149,6 +151,24 @@ class TempCleaner:
                         seen += 1
                         if seen >= max_files_per_category:
                             break
+                    
+                    # Then add directories (if we haven't hit the limit)
+                    if seen < max_files_per_category:
+                        for path in self._iter_dirs(root, follow_symlinks=follow_symlinks):
+                            try:
+                                st = path.stat()
+                                # Directories typically report their own size, not contents
+                                # We'll use 0 to avoid double-counting space
+                                size = 0
+                                entry = TempFileEntry(path=path, size=size, mtime=st.st_mtime, 
+                                                   category=key, is_directory=True)
+                                cat_res.add(entry)
+                                seen += 1
+                                if seen >= max_files_per_category:
+                                    break
+                            except (FileNotFoundError, PermissionError, OSError) as exc:
+                                cat_res.errors.append(f"{path}: {exc}")
+                                continue
                 except Exception as exc:  # broad: protect scanning loop
                     cat_res.errors.append(f"Root {root} scan error: {exc}")
             cats[key] = cat_res
@@ -165,39 +185,78 @@ class TempCleaner:
         dry_run: bool = True,
         min_age_seconds: int = 0,
         categories: Optional[Iterable[str]] = None,
-    ) -> Dict[str, Dict[str, int]]:
+    ) -> Dict[str, Dict]:
         """Delete files matching criteria.
 
-        Returns per-category dict with counts & size removed / would remove.
+        Returns per-category dict with counts, size removed, and lists of deleted files and directories.
         """
         selected = set(categories) if categories else set(scan.categories.keys())
-        report: Dict[str, Dict[str, int]] = {}
+        report: Dict[str, Dict] = {}
         now = time.time()
         for key in selected:
             cat = scan.categories.get(key)
             if not cat:
                 continue
             removed_files = 0
+            removed_dirs = 0
             removed_size = 0
+            deleted_files = []  # Track which files were deleted
+            deleted_dirs = []   # Track which directories were deleted
+            
+            # First process all entries - we need to track both files and directories
             for entry in cat.files:
                 if not entry.removable:
                     continue
                 if min_age_seconds and (now - entry.mtime) < min_age_seconds:
                     continue
+                    
                 try:
                     if not dry_run:
-                        # Safety: only delete regular files under declared category roots
-                        if entry.path.is_file():
-                            entry.path.unlink(missing_ok=True)  # type: ignore[arg-type]
-                    removed_files += 1
-                    removed_size += entry.size
+                        if entry.is_directory:
+                            # For directories, we'll just track them for now
+                            # Since directories are sorted in reverse depth order
+                            # we can safely remove them after processing all files
+                            if entry.path.is_dir() and not entry.path.is_symlink():
+                                removed_dirs += 1
+                                deleted_dirs.append(str(entry.path))
+                        else:
+                            # For files, remove immediately
+                            if entry.path.is_file():
+                                entry.path.unlink(missing_ok=True)  # type: ignore[arg-type]
+                                removed_files += 1
+                                removed_size += entry.size
+                                deleted_files.append(str(entry.path))
+                    else:
+                        # In dry run, just track everything
+                        if entry.is_directory:
+                            removed_dirs += 1
+                            deleted_dirs.append(str(entry.path))
+                        else:
+                            removed_files += 1
+                            removed_size += entry.size
+                            deleted_files.append(str(entry.path))
                 except Exception:
                     # best-effort; ignore individual delete failures
                     pass
+            
+            # Now remove the directories if not in dry run mode
+            # We do this after processing all files to ensure directories are empty
+            if not dry_run:
+                for dir_path in deleted_dirs:
+                    try:
+                        Path(dir_path).rmdir()
+                    except (OSError, PermissionError):
+                        # Directory might not be empty or might be locked
+                        # We'll keep it in the list anyway to show the attempt
+                        pass
+                        
             report[key] = {
                 "files": removed_files,
+                "dirs": removed_dirs,
                 "size": removed_size,
                 "dry_run": 1 if dry_run else 0,
+                "deleted_files": deleted_files,  # Files
+                "deleted_dirs": deleted_dirs     # Directories
             }
         return report
 
@@ -217,5 +276,32 @@ class TempCleaner:
                     except OSError:
                         continue
                     yield p
+        except Exception:
+            return
+            
+    def _iter_dirs(self, root: Path, follow_symlinks: bool = False) -> Iterator[Path]:
+        """Similar to _iter_files but yields directories in reverse depth order (deepest first).
+        This ensures proper directory deletion (must delete contents before parent).
+        """
+        try:
+            # First collect all directories
+            all_dirs = []
+            for dirpath, dirnames, _ in os.walk(root):
+                # Prune extremely deep trees defensively
+                if dirpath.count(os.sep) - str(root).count(os.sep) > 12:
+                    del dirnames[:]
+                    continue
+                for name in dirnames:
+                    p = Path(dirpath) / name
+                    try:
+                        if not follow_symlinks and p.is_symlink():
+                            continue
+                        all_dirs.append(p)
+                    except OSError:
+                        continue
+            
+            # Sort by depth (deepest first) for proper deletion order
+            all_dirs.sort(key=lambda p: -str(p).count(os.sep))
+            yield from all_dirs
         except Exception:
             return

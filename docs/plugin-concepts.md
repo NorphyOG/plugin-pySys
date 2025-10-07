@@ -198,6 +198,36 @@ Act as a media control center with Netflix-style browsing, metadata enrichment, 
 ### Implementation Phases (MediaLibrary)
 
 1. Baseline library scanning and static grid UI with local metadata only.
+2. (Enhanced Mode Incremental) Introduce optional enhanced widget gated by `MMST_MEDIA_LIBRARY_ENHANCED` / config flag.
+3. Add table + gallery hybrid, detail panel, shelves (recent/top rated/tags).
+4. Integrate filesystem watcher (debounced refresh) and smart playlist filtering.
+
+#### Enhanced Mode Additions (Current Status)
+
+The enhanced Media Library path is additive and opt-in:
+
+- Filesystem Watcher: Starts automatically when watchdog is installed, watching all indexed sources. Events batch-refresh table, gallery, and shelves after 250 ms of inactivity.
+- Smart Playlists: Header combo lists available playlists loaded from user data `smart_playlists.json` or bundled default. Selection filters before other UI filters and persists in `enhanced_state.smart_playlist`.
+- Batch Actions: Multi-row selection exposes a bar to set rating or append tags to all selected entries.
+- Attribute Filters: Header provides a minimum rating selector (≥ ★..★★ etc.) plus a tag filter field (comma-separated; matches any tag). These filters layer on top of smart playlist results and persist in `enhanced_state.rating_filter_min` / `enhanced_state.tag_filter`.
+- Lazy Gallery Loading: Gallery first paints an initial batch (default 40) of cover thumbnails, then queues the remainder on a short timer to keep UI responsive for large libraries.
+
+Headless safety: All PySide6 interactions are guarded by try/except with stub fallbacks so existing tests continue to execute without the GUI stack.
+2. (Enhanced mode placeholder) Persist lightweight UI state under `enhanced_state` when feature flag `MMST_MEDIA_LIBRARY_ENHANCED` or config key `enhanced_enabled` is set.
+
+#### Enhanced Mode State Persistence
+
+The experimental enhanced UI (opt‑in) stores a small dictionary under the plugin config key `enhanced_state`:
+
+```json
+{
+  "view_mode": "table" | "gallery" | "split",
+  "dashboard_visible": true,
+  "selected_path": "C:/path/to/file.ext"
+}
+```
+
+All keys are optional; absence implies defaults (table view, dashboard visible, no current selection). This bucket is safe to evolve with additional fields like playback position or filter presets; consumers must treat missing keys as defaults. The minimal restored widget ignores these values so legacy tests remain stable.
 2. Add metadata fetching (one provider) and cover cache.
 3. Implement detail editor, external player hooks, and SQLite persistence.
 4. Introduce real-time monitoring and Calibre adapter.

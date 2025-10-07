@@ -4,6 +4,20 @@ import concurrent.futures
 from pathlib import Path
 from typing import Callable, Dict, List, Optional
 import time
+import os
+import sys
+import platform
+import shutil
+import glob
+import json
+import tempfile
+import webbrowser
+from datetime import datetime
+
+from mmst.core.console_logger import ConsoleLogger
+from .console_widget import ConsoleWidget
+from .log_analysis_widget import LogAnalysisWidget
+from .notification_center_widget import NotificationCenterWidget
 from PySide6.QtCore import Qt, Signal, QTimer
 from PySide6.QtWidgets import (
     QComboBox,
@@ -26,7 +40,7 @@ from PySide6.QtWidgets import (
 
 from ...core.plugin_base import BasePlugin, PluginManifest
 from .converter import ConversionJob, ConversionResult, FileConverter
-from .image_compression import ImageCompressionWidget
+from .image_compression import DataCompressionWidget
 from .disk_monitor import DiskMonitorWidget, DiskMonitor
 from .temp_cleaner import TempCleaner, ScanResult
 from .tools import CONVERSION_FORMATS, Tool, ToolDetector, get_supported_formats, infer_format
@@ -616,10 +630,14 @@ class SystemToolsPlugin(BasePlugin):
         self._widget: Optional[QTabWidget] = None
         self._converter_widget: Optional[ConverterWidget] = None
         self._batch_widget: Optional[BatchQueueWidget] = None
-        self._compression_widget: Optional[ImageCompressionWidget] = None
+        self._compression_widget: Optional[DataCompressionWidget] = None
         self._disk_monitor_widget: Optional[DiskMonitorWidget] = None
         # Temp cleaner components
         self._temp_cleaner_widget: Optional[QWidget] = None
+        # Console components
+        self._console_widget: Optional[ConsoleWidget] = None
+        self._log_analysis_widget: Optional[LogAnalysisWidget] = None
+        self._notification_center_widget: Optional[NotificationCenterWidget] = None
         self._temp_cleaner_backend = TempCleaner()
         self._temp_cleaner_last_scan: Optional[ScanResult] = None
 
@@ -650,9 +668,9 @@ class SystemToolsPlugin(BasePlugin):
             self._widget.addTab(self._batch_widget, "📋 Batch-Warteschlange")
             
             # Create image compression tab
-            self._compression_widget = ImageCompressionWidget(self)
+            self._compression_widget = DataCompressionWidget(self)
             self._compression_widget.set_enabled(self._active)
-            self._widget.addTab(self._compression_widget, "🖼️ Bild-Komprimierung")
+            self._widget.addTab(self._compression_widget, "� Daten-Komprimierung")
             
             # Create disk monitor tab
             self._disk_monitor_widget = DiskMonitorWidget()
@@ -665,6 +683,21 @@ class SystemToolsPlugin(BasePlugin):
             self._widget.addTab(self._temp_cleaner_widget, "🧹 Temp Cleaner")
             # Restore persisted temp cleaner state
             self._restore_temp_cleaner_state()
+            
+            # Create console tab
+            self._console_widget = ConsoleWidget()
+            self._console_widget.setEnabled(self._active)
+            self._widget.addTab(self._console_widget, "🔍 Console")
+            
+            # Create log analysis tab
+            self._log_analysis_widget = LogAnalysisWidget()
+            self._log_analysis_widget.setEnabled(self._active)
+            self._widget.addTab(self._log_analysis_widget, "📊 Log Analysis")
+            
+            # Create notification center tab
+            self._notification_center_widget = NotificationCenterWidget()
+            self._notification_center_widget.setEnabled(self._active)
+            self._widget.addTab(self._notification_center_widget, "🔔 Notifications")
         
         return self._widget
 
@@ -680,6 +713,10 @@ class SystemToolsPlugin(BasePlugin):
             self._disk_monitor_widget.set_enabled(True)
         if self._temp_cleaner_widget:
             self._temp_cleaner_widget.setEnabled(True)
+        if self._console_widget:
+            self._console_widget.setEnabled(True)
+        if self._log_analysis_widget:
+            self._log_analysis_widget.setEnabled(True)
         
         self._start_monitoring()
 
@@ -695,6 +732,10 @@ class SystemToolsPlugin(BasePlugin):
             self._disk_monitor_widget.set_enabled(False)
         if self._temp_cleaner_widget:
             self._temp_cleaner_widget.setEnabled(False)
+        if self._console_widget:
+            self._console_widget.setEnabled(False)
+        if self._log_analysis_widget:
+            self._log_analysis_widget.setEnabled(False)
             
         self._stop_monitoring()
         # Persist temp cleaner state
@@ -927,8 +968,39 @@ class SystemToolsPlugin(BasePlugin):
                     self._temp_log.appendPlainText(
                         f"[{cat.display}] Entfernt: {removed_files} Dateien, {self._format_size(removed_size)} {'(Dry Run)' if dry_run else ''}"
                     )
+                    
+                    # Display the list of deleted files if there are any
+                    deleted_files = stats.get('deleted_files', [])
+                    deleted_dirs = stats.get('deleted_dirs', [])
+                    removed_dirs = stats.get('dirs', 0)
+                    
+                    # Show files
+                    if deleted_files and removed_files > 0:
+                        self._temp_log.appendPlainText(f"  [Dateien:]")
+                        max_files_to_show = 8  # Avoid UI clutter by limiting the number of files shown
+                        if len(deleted_files) <= max_files_to_show:
+                            for path in deleted_files:
+                                self._temp_log.appendPlainText(f"  → {path}")
+                        else:
+                            for path in deleted_files[:max_files_to_show-1]:
+                                self._temp_log.appendPlainText(f"  → {path}")
+                            self._temp_log.appendPlainText(f"  → ... und {len(deleted_files) - (max_files_to_show-1)} weitere Dateien")
+                    
+                    # Show directories
+                    if deleted_dirs and removed_dirs > 0:
+                        self._temp_log.appendPlainText(f"  [Ordner:]")
+                        max_dirs_to_show = 5  # Fewer directories to show
+                        if len(deleted_dirs) <= max_dirs_to_show:
+                            for path in deleted_dirs:
+                                self._temp_log.appendPlainText(f"  → {path}")
+                        else:
+                            for path in deleted_dirs[:max_dirs_to_show-1]:
+                                self._temp_log.appendPlainText(f"  → {path}")
+                            self._temp_log.appendPlainText(f"  → ... und {len(deleted_dirs) - (max_dirs_to_show-1)} weitere Ordner")
+                    
+                total_dirs = sum(stats.get('dirs', 0) for stats in report.values())
                 self._temp_log.appendPlainText(
-                    f"Gesamt entfernt: {total_removed} Dateien, {self._format_size(total_size)} {'(Dry Run)' if dry_run else ''}"
+                    f"Gesamt entfernt: {total_removed} Dateien, {total_dirs} Ordner, {self._format_size(total_size)} {'(Dry Run)' if dry_run else ''}"
                 )
                 if not dry_run:
                     # Re-run scan automatically to refresh view

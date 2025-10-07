@@ -735,6 +735,7 @@ class RecorderPanel(QWidget):
         self._timer_duration_seconds = 300  # 5 minutes default
         self._recording_start_time: Optional[float] = None
         self._timer_update_timer: Optional[QTimer] = None
+        self._recording_time_timer: Optional[QTimer] = None
 
         layout = QVBoxLayout(self)
         layout.setSpacing(8)
@@ -833,6 +834,13 @@ class RecorderPanel(QWidget):
         self.quality_button = QPushButton("Qualität …")
         self.quality_button.clicked.connect(self._open_quality_dialog)
         control_row.addWidget(self.quality_button)
+        
+        # Recording time display
+        self.recording_time_label = QLabel("Aufnahmezeit: --:--")
+        self.recording_time_label.setStyleSheet("font-size: 16px; font-weight: bold; color: #2196F3; padding: 5px; border-radius: 4px;")
+        self.recording_time_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.recording_time_label.setMinimumWidth(200)
+        control_row.addWidget(self.recording_time_label)
 
         self.metadata_button = QPushButton("Metadaten …")
         self.metadata_button.setEnabled(False)
@@ -1035,15 +1043,22 @@ class RecorderPanel(QWidget):
             QMessageBox.critical(self, "Unerwarteter Fehler", str(exc))
             return
         
-        # Start timer tracking if enabled
+        # Always track recording time, regardless of timer status
+        import time
+        self._recording_start_time = time.time()
+        
+        # Start timer-based recording if enabled
         if self._timer_enabled:
-            import time
-            self._recording_start_time = time.time()
             if self._timer_update_timer:
                 self._timer_update_timer.start()
             self._plugin._logger.info("⏱️ Timer-basierte Aufnahme gestartet: %d Minuten", self._timer_duration_seconds // 60)
-        else:
-            self._recording_start_time = None
+        
+        # Initialize and start recording time display update timer
+        if not self._recording_time_timer:
+            self._recording_time_timer = QTimer(self)
+            self._recording_time_timer.timeout.connect(self._update_recording_time_display)
+        self._recording_time_timer.start(1000)  # Update every second
+        self._update_recording_time_display()  # Update immediately
         
         self._update_controls()
 
@@ -1051,9 +1066,15 @@ class RecorderPanel(QWidget):
         if not self._plugin.is_recording():
             return
         
-        # Stop timer tracking
+        # Stop timers
         if self._timer_update_timer:
             self._timer_update_timer.stop()
+        if self._recording_time_timer:
+            self._recording_time_timer.stop()
+            
+        # Reset recording time display
+        self.recording_time_label.setText("Aufnahmezeit: --:--")
+        self.recording_time_label.setStyleSheet("font-size: 16px; font-weight: bold; color: #2196F3; padding: 5px; border-radius: 4px;")
         self._recording_start_time = None
         
         try:
@@ -1175,12 +1196,66 @@ class RecorderPanel(QWidget):
                 f"⏱️ Noch {remaining_minutes}:{remaining_seconds:02d} | Aufnahme: {elapsed_str}"
             )
             self.timer_status_label.setStyleSheet("color: #4CAF50; font-weight: bold;")
+            
+    def _update_recording_time_display(self) -> None:
+        """Update the recording time display label."""
+        if not self._plugin.is_recording() or self._recording_start_time is None:
+            if self._recording_time_timer and self._recording_time_timer.isActive():
+                self._recording_time_timer.stop()
+            self.recording_time_label.setText("Aufnahmezeit: --:--")
+            return
+            
+        import time
+        elapsed = time.time() - self._recording_start_time
+        
+        # Format as MM:SS or HH:MM:SS for longer recordings
+        hours = int(elapsed // 3600)
+        minutes = int((elapsed % 3600) // 60)
+        seconds = int(elapsed % 60)
+        
+        if hours > 0:
+            time_str = f"{hours:02d}:{minutes:02d}:{seconds:02d}"
+        else:
+            time_str = f"{minutes:02d}:{seconds:02d}"
+            
+        # Change color based on duration to provide visual feedback
+        if elapsed > 1800:  # 30 minutes
+            color = "#F44336"  # Red for very long recordings
+        elif elapsed > 600:  # 10 minutes
+            color = "#FF9800"  # Orange for medium recordings
+        else:
+            color = "#2196F3"  # Blue for normal recordings
+            
+        # Add recording indicator icon (red dot) to make recording status more visible
+        self.recording_time_label.setText(f"🔴 Aufnahmezeit: {time_str}")
+        self.recording_time_label.setStyleSheet(f"font-size: 16px; font-weight: bold; color: {color}; padding: 5px; background-color: rgba(0, 0, 0, 0.1); border-radius: 4px;")
+        minutes = int(elapsed // 60)
+        seconds = int(elapsed % 60)
+        
+        if minutes >= 60:
+            hours = minutes // 60
+            minutes = minutes % 60
+            time_str = f"{hours:02d}:{minutes:02d}:{seconds:02d}"
+        else:
+            time_str = f"{minutes:02d}:{seconds:02d}"
+            
+        # Change color based on duration for visual feedback
+        if minutes >= 30:  # Long recording (> 30 minutes)
+            self.recording_time_label.setStyleSheet("font-size: 14px; font-weight: bold; color: #F44336;")
+        elif minutes >= 10:  # Medium recording (10-30 minutes)
+            self.recording_time_label.setStyleSheet("font-size: 14px; font-weight: bold; color: #FF9800;")
+        else:  # Short recording (< 10 minutes)
+            self.recording_time_label.setStyleSheet("font-size: 14px; font-weight: bold; color: #2196F3;")
+            
+        self.recording_time_label.setText(f"🔴 Aufnahmezeit: {time_str}")
 
     def closeEvent(self, event) -> None:  # type: ignore[override]
         if hasattr(self, "visualizer"):
             self.visualizer.stop()
         if hasattr(self, "_timer_update_timer") and self._timer_update_timer:
             self._timer_update_timer.stop()
+        if hasattr(self, "_recording_time_timer") and self._recording_time_timer:
+            self._recording_time_timer.stop()
         super().closeEvent(event)
 
 

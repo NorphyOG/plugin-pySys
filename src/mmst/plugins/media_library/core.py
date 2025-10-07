@@ -1,13 +1,26 @@
 from __future__ import annotations
 
+import json
 import logging
 import os
 import sqlite3
-import json
 import threading
+import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable, Iterable, List, Optional, Tuple
+
+from .telemetry import get_telemetry_sink
+
+
+def _record_query(name: str, duration: float, count: Optional[int] = None) -> None:
+    sink = get_telemetry_sink()
+    if sink:
+        try:
+            sink.record("query", name, duration, count)
+        except Exception:
+            # Telemetry must never interfere with normal execution.
+            pass
 
 
 logger = logging.getLogger(__name__)
@@ -99,9 +112,13 @@ class LibraryIndex:
 
     def list_sources(self) -> List[Tuple[int, str]]:
         with self._lock:
+            start = time.perf_counter()
             cur = self._conn.cursor()
             cur.execute("SELECT id, path FROM sources ORDER BY id")
-            return [(int(r[0]), str(r[1])) for r in cur.fetchall()]
+            rows = cur.fetchall()
+            duration = time.perf_counter() - start
+        _record_query("list_sources", duration, len(rows))
+        return [(int(r[0]), str(r[1])) for r in rows]
 
     def upsert_file(self, source_id: int, rel_path: str, meta: MediaFile) -> None:
         with self._lock:
@@ -123,6 +140,7 @@ class LibraryIndex:
 
     def list_files_with_sources(self, limit: Optional[int] = None) -> List[Tuple[MediaFile, Path]]:
         with self._lock:
+            start = time.perf_counter()
             cur = self._conn.cursor()
             if limit is not None:
                 cur.execute(
@@ -145,6 +163,7 @@ class LibraryIndex:
                     """
                 )
             rows = cur.fetchall()
+            duration = time.perf_counter() - start
         results: List[Tuple[MediaFile, Path]] = []
         for row in rows:
             tags_value: Tuple[str, ...] = tuple()
@@ -166,10 +185,12 @@ class LibraryIndex:
             )
             source_path = Path(str(row[4]))
             results.append((media, source_path))
+        _record_query("list_files_with_sources", duration, len(results))
         return results
 
     def list_playlists(self) -> List[Tuple[int, str, int]]:
         with self._lock:
+            start = time.perf_counter()
             cur = self._conn.cursor()
             cur.execute(
                 """
@@ -181,6 +202,8 @@ class LibraryIndex:
                 """
             )
             rows = cur.fetchall()
+        duration = time.perf_counter() - start
+        _record_query("list_playlists", duration, len(rows))
         return [(int(row[0]), str(row[1]), int(row[2])) for row in rows]
 
     def create_playlist(self, name: str) -> Optional[int]:
@@ -225,6 +248,7 @@ class LibraryIndex:
 
     def list_playlist_items(self, playlist_id: int) -> List[Tuple[MediaFile, Path]]:
         with self._lock:
+            start = time.perf_counter()
             cur = self._conn.cursor()
             cur.execute(
                 """
@@ -238,6 +262,7 @@ class LibraryIndex:
                 (int(playlist_id),),
             )
             rows = cur.fetchall()
+            duration = time.perf_counter() - start
         results: List[Tuple[MediaFile, Path]] = []
         for row in rows:
             tags_value: Tuple[str, ...] = tuple()
@@ -259,6 +284,7 @@ class LibraryIndex:
             )
             source_path = Path(str(row[4]))
             results.append((media, source_path))
+        _record_query("list_playlist_items", duration, len(results))
         return results
 
     def add_to_playlist(self, playlist_id: int, file_path: Path) -> bool:

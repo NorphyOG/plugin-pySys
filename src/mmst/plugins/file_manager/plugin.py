@@ -198,7 +198,7 @@ class FileManagerWidget(QWidget):
         
         self.profile_combo = QComboBox()
         self.profile_combo.addItem("(Kein Profil)")
-        self.profile_combo.currentTextChanged.connect(self._load_backup_profile)
+        self.profile_combo.currentIndexChanged.connect(self._load_backup_profile)
         profile_layout.addWidget(self.profile_combo, stretch=1)
         
         save_profile_btn = QPushButton("💾 Speichern")
@@ -1000,7 +1000,10 @@ class FileManagerPlugin(BasePlugin):
             self._widget = FileManagerWidget(self)
             self._widget.set_enabled(self._active)
             self._widget.refresh_schedule_profile_list()
-        return self._widget
+        # Defensive fallback (should never be None here)
+        if self._widget is None:  # pragma: no cover - safety net
+            self._widget = FileManagerWidget(self)
+        return self._widget  # type: ignore[return-value]
 
     def initialize(self) -> None:
         self.services.ensure_subdirectories("backups", "logs")

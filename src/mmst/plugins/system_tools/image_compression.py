@@ -7,11 +7,17 @@ format selection, and batch processing capabilities.
 from __future__ import annotations
 
 from pathlib import Path
-from typing import List, Optional, TYPE_CHECKING
+import os
+import shutil
+import webbrowser
+import tempfile
+import concurrent.futures
+from typing import List, Optional, TYPE_CHECKING, Dict, Any, Callable
 
 from PySide6.QtCore import Qt, Signal, QSize  # type: ignore[import-not-found]
 from PySide6.QtGui import QPixmap, QDragEnterEvent, QDropEvent  # type: ignore[import-not-found]
 from PySide6.QtWidgets import (  # type: ignore[import-not-found]
+    QApplication,
     QComboBox,
     QFileDialog,
     QFormLayout,
@@ -116,23 +122,73 @@ class CompressionPresetManager:
         return cls.PRESETS.get(name)
 
 
-class ImageCompressionWidget(QWidget):
-    """Widget for compressing images with visual comparison."""
+class DataCompressionWidget(QWidget):
+    """Widget for compressing images and other file types with visual comparison and compression tools."""
     
     compression_started = Signal()
     compression_progress = Signal(str)  # message
     compression_finished = Signal(bool, str)  # success, message
     
+    def _detect_available_compression_tools(self) -> Dict[str, bool]:
+        """Detect available compression tools and return a dictionary of tool names and availability."""
+        result = {
+            "imagemagick": False,
+            "zip": False
+        }
+        
+        # Check for ImageMagick
+        imagemagick = self.tools.get("imagemagick")
+        if imagemagick and imagemagick.available:
+            result["imagemagick"] = True
+            
+        # Check for ZIP tools (7-Zip or built-in)
+        if shutil.which("7z") or shutil.which("zip"):
+            result["zip"] = True
+            
+        return result
+
     def __init__(self, plugin: SystemToolsPlugin) -> None:
         super().__init__()
         self._plugin = plugin
         self._source_path: Optional[Path] = None
         self._compressed_path: Optional[Path] = None
+        self._file_type: str = "image"  # Default file type: "image", "archive", "other"
         
         self.setAcceptDrops(True)
         
         layout = QVBoxLayout(self)
         layout.setSpacing(8)
+        
+        # Tool status bar
+        status_bar = QHBoxLayout()
+        
+        # Check available tools
+        self.tools = self._plugin.detect_tools()
+        self.available_tools = self._detect_available_compression_tools()
+        
+        # Show warnings for missing tools
+        if not self.available_tools.get("imagemagick"):
+            warning = QLabel("⚠️ ImageMagick ist nicht installiert. Bild-Komprimierung eingeschränkt.")
+            warning.setStyleSheet("color: orange; font-weight: bold;")
+            status_bar.addWidget(warning)
+            
+        if not self.available_tools.get("zip"):
+            warning = QLabel("⚠️ 7-Zip ist nicht installiert. Archiv-Komprimierung eingeschränkt.")
+            warning.setStyleSheet("color: orange; font-weight: bold;")
+            status_bar.addWidget(warning)
+            
+            install_btn = QPushButton("🔧 ImageMagick installieren")
+            install_btn.clicked.connect(self._install_imagemagick)
+            status_bar.addWidget(install_btn)
+        else:
+            imagemagick = self.tools.get("imagemagick")
+            version = imagemagick.version if imagemagick else 'unbekannte Version'
+            status = QLabel(f"✅ ImageMagick verfügbar ({version})")
+            status.setStyleSheet("color: green;")
+            status_bar.addWidget(status)
+        
+        status_bar.addStretch(1)
+        layout.addLayout(status_bar)
         
         # Top controls
         controls_group = QGroupBox("Komprimierungseinstellungen")
@@ -149,6 +205,12 @@ class ImageCompressionWidget(QWidget):
         source_button.clicked.connect(self._pick_source)
         source_layout.addWidget(source_button)
         controls_layout.addRow("Quelldatei:", source_row)
+        
+        # File type selector
+        self.file_type_combo = QComboBox()
+        self.file_type_combo.addItems(["Bild", "Archiv", "Andere"])
+        self.file_type_combo.currentTextChanged.connect(self._on_file_type_changed)
+        controls_layout.addRow("Dateityp:", self.file_type_combo)
         
         # Preset selector
         preset_row = QWidget()
@@ -212,6 +274,21 @@ class ImageCompressionWidget(QWidget):
         preview_layout.addWidget(splitter)
         layout.addWidget(preview_group, stretch=1)
         
+        # Statistics area
+        stats_group = QGroupBox("Statistik")
+        stats_layout = QFormLayout(stats_group)
+        
+        # Add statistics labels
+        self.original_size_label = QLabel("0 KB")
+        self.compressed_size_label = QLabel("0 KB")
+        self.savings_label = QLabel("0 KB (0%)")
+        
+        stats_layout.addRow("Original:", self.original_size_label)
+        stats_layout.addRow("Komprimiert:", self.compressed_size_label)
+        stats_layout.addRow("Ersparnis:", self.savings_label)
+        
+        layout.addWidget(stats_group)
+        
         # Action buttons
         action_row = QHBoxLayout()
         action_row.addStretch()
@@ -240,22 +317,64 @@ class ImageCompressionWidget(QWidget):
         self.setEnabled(enabled)
     
     def _pick_source(self) -> None:
-        """Open file dialog to select source image."""
+        """Open file dialog to select source file based on the current file type."""
+        file_type = self._file_type
+        
+        if file_type == "image":
+            title = "Bilddatei wählen"
+            filter_str = "Bilder (*.jpg *.jpeg *.png *.bmp *.gif *.webp);;Alle Dateien (*.*)"
+        elif file_type == "archive":
+            title = "Datei oder Ordner für Archivierung wählen"
+            filter_str = "Alle Dateien (*.*)"
+            
+            # For archives, offer to select directories too
+            dir_path = QFileDialog.getExistingDirectory(
+                self,
+                "Ordner für Archivierung wählen"
+            )
+            
+            if dir_path:
+                self._set_source(Path(dir_path))
+                return
+        else:
+            title = "Datei zur Komprimierung wählen"
+            filter_str = "Alle Dateien (*.*)"
+            
         file_path, _ = QFileDialog.getOpenFileName(
             self,
-            "Bilddatei wählen",
+            title,
             "",
-            "Bilder (*.jpg *.jpeg *.png *.bmp *.gif *.webp);;Alle Dateien (*.*)"
+            filter_str
         )
         
         if file_path:
             self._set_source(Path(file_path))
     
     def _set_source(self, path: Path) -> None:
-        """Set the source image path."""
+        """Set the source file path and update UI accordingly."""
         self._source_path = path
         self._compressed_path = None
         self.source_edit.setText(path.name)
+        
+        # Automatically detect file type and update UI
+        if path.suffix.lower() in ['.jpg', '.jpeg', '.png', '.bmp', '.gif', '.webp']:
+            self.file_type_combo.setCurrentText("Bild")
+        elif path.is_dir() or path.suffix.lower() in ['.zip', '.rar', '.7z', '.tar', '.gz']:
+            self.file_type_combo.setCurrentText("Archiv")
+        else:
+            self.file_type_combo.setCurrentText("Andere")
+            
+        # Load preview if it's an image
+        if path.suffix.lower() in ['.jpg', '.jpeg', '.png', '.bmp', '.gif', '.webp']:
+            self.original_preview.set_image(path)
+        
+        # Enable preview button
+        self.preview_button.setEnabled(True)
+        
+        # Reset any existing preview
+        self.compressed_preview.clear()
+        self.save_button.setEnabled(False)
+        self.replace_button.setEnabled(False)
         self.original_preview.set_image(path)
         self.compressed_preview.clear()
         self.preview_button.setEnabled(True)
@@ -299,13 +418,265 @@ class ImageCompressionWidget(QWidget):
             self.preset_combo.blockSignals(True)
             self.preset_combo.setCurrentIndex(0)
             self.preset_combo.blockSignals(False)
+            
+    def _install_imagemagick(self) -> None:
+        """Help the user install ImageMagick."""
+        from .tools import ToolDetector
+        tool_detector = ToolDetector()
+        installation_info = tool_detector.get_installation_info("imagemagick")
+        
+        message_box = QMessageBox(self)
+        message_box.setIcon(QMessageBox.Icon.Information)
+        message_box.setWindowTitle(installation_info["title"])
+        message_box.setText(installation_info["description"])
+        message_box.setInformativeText(installation_info["install_instructions"])
+        
+        # Add buttons
+        message_box.setStandardButtons(QMessageBox.StandardButton.Ok)
+        
+        # Add button to open download page
+        if "download_url" in installation_info and installation_info["download_url"]:
+            open_browser_btn = message_box.addButton("Download öffnen", QMessageBox.ButtonRole.ActionRole)
+        else:
+            open_browser_btn = None
+            
+        result = message_box.exec()
+        
+        # Open browser if the button was clicked
+        if open_browser_btn and message_box.clickedButton() == open_browser_btn:
+            import webbrowser
+            webbrowser.open(installation_info["download_url"])
     
+    def _on_file_type_changed(self, file_type: str) -> None:
+        """Handle file type selection change."""
+        if file_type == "Bild":
+            self._file_type = "image"
+            self.format_combo.clear()
+            self.format_combo.addItems(["jpg", "png", "webp"])
+            self.quality_slider.setEnabled(True)
+            self.original_preview.setVisible(True)
+            self.compressed_preview.setVisible(True)
+            self.format_combo.setEnabled(True)
+        elif file_type == "Archiv":
+            self._file_type = "archive"
+            self.format_combo.clear()
+            self.format_combo.addItems(["zip", "7z"])
+            self.quality_slider.setEnabled(True)
+            self.original_preview.setVisible(False)
+            self.compressed_preview.setVisible(False)
+            self.format_combo.setEnabled(True)
+        else:  # Other
+            self._file_type = "other"
+            self.format_combo.clear()
+            self.format_combo.addItems(["compressed"])
+            self.quality_slider.setEnabled(True)
+            self.original_preview.setVisible(False)
+            self.compressed_preview.setVisible(False)
+            self.format_combo.setEnabled(False)
+        
+        self._update_preview_button()
+        
     def _generate_preview(self) -> None:
         """Generate compressed preview."""
         if not self._source_path or not self._source_path.exists():
             QMessageBox.warning(self, "Fehler", "Keine gültige Quelldatei ausgewählt.")
             return
         
+        # Generate preview based on file type
+        if self._file_type == "image":
+            self._generate_image_preview()
+        elif self._file_type == "archive":
+            self._generate_archive_preview()
+        else:
+            self._generate_generic_compression_preview()
+            
+    def _update_stats(self) -> None:
+        """Update size statistics for the files."""
+        if not self._source_path or not self._compressed_path:
+            return
+            
+        if not self._source_path.exists() or not self._compressed_path.exists():
+            return
+            
+        original_size = self._source_path.stat().st_size
+        compressed_size = self._compressed_path.stat().st_size
+        savings = original_size - compressed_size
+        savings_percent = (savings / original_size) * 100 if original_size > 0 else 0
+        
+        self.original_size_label.setText(f"{original_size / 1024:.1f} KB")
+        self.compressed_size_label.setText(f"{compressed_size / 1024:.1f} KB")
+        self.savings_label.setText(f"{savings / 1024:.1f} KB ({savings_percent:.1f}%)")
+    
+    def _generate_archive_preview(self) -> None:
+        """Generate archive compression preview."""
+        if not self._source_path:
+            return
+            
+        target_format = self.format_combo.currentText()
+        compression_level = self.quality_slider.value()
+        
+        temp_dir = Path.home() / ".mmst" / "temp"
+        temp_dir.mkdir(parents=True, exist_ok=True)
+        self._compressed_path = temp_dir / f"{self._source_path.stem}_compressed.{target_format}"
+        
+        self.compression_started.emit()
+        self.preview_button.setEnabled(False)
+        self.compression_progress.emit(f"Erstelle {target_format}-Archiv...")
+        
+        # Run compression in thread
+        def run_archive_compression():
+            try:
+                import subprocess
+                import shutil
+                import zipfile
+                import os
+                from tempfile import TemporaryDirectory
+                
+                source_path = self._source_path
+                compressed_path = self._compressed_path
+                
+                if not source_path or not compressed_path:
+                    return False
+                    
+                if target_format == "zip":
+                    with zipfile.ZipFile(str(compressed_path), 'w', 
+                                         compression=zipfile.ZIP_DEFLATED, 
+                                         compresslevel=max(1, min(9, compression_level // 10))) as zipf:
+                        if source_path.is_dir():
+                            for root, _, files in os.walk(source_path):
+                                for file in files:
+                                    file_path = Path(root) / file
+                                    zipf.write(str(file_path), str(file_path.relative_to(source_path)))
+                        else:
+                            zipf.write(str(source_path), source_path.name)
+                else:  # 7z
+                    if shutil.which("7z"):
+                        subprocess.run([
+                            "7z", "a", "-t7z", 
+                            f"-mx={max(1, min(9, compression_level // 10))}", 
+                            str(compressed_path), 
+                            str(source_path)
+                        ])
+                    else:
+                        raise Exception("7-Zip ist nicht installiert")
+                return True
+            except Exception as e:
+                print(f"Fehler beim Komprimieren: {e}")
+                return False
+        
+        # Run in thread
+        def on_thread_complete(future):
+            success = future.result()
+            if success and self._compressed_path and self._compressed_path.exists():
+                self.save_button.setEnabled(True)
+                self.replace_button.setEnabled(False)  # Don't allow replacing originals with archives
+                
+                # Show compression stats instead of preview
+                self._update_stats()
+                self.compression_finished.emit(True, "Archiv erfolgreich erstellt!")
+            else:
+                self.compression_finished.emit(False, "Archiv-Erstellung fehlgeschlagen.")
+            self.preview_button.setEnabled(True)
+        
+        # Run the compression in a background thread
+        executor = concurrent.futures.ThreadPoolExecutor(max_workers=1)
+        future = executor.submit(run_archive_compression)
+        
+        # Use Qt timer to check result
+        from PySide6.QtCore import QTimer
+        timer = QTimer(self)
+        timer.setSingleShot(True)
+        timer.setInterval(100)  # 100 ms
+        
+        def check_future():
+            if future.done():
+                on_thread_complete(future)
+                timer.stop()
+            else:
+                timer.start()
+                
+        timer.timeout.connect(check_future)
+        timer.start()
+
+    def _generate_generic_compression_preview(self) -> None:
+        """Generate generic compression preview."""
+        if not self._source_path:
+            return
+            
+        compression_level = self.quality_slider.value()
+        
+        temp_dir = Path.home() / ".mmst" / "temp"
+        temp_dir.mkdir(parents=True, exist_ok=True)
+        self._compressed_path = temp_dir / f"{self._source_path.stem}_compressed"
+        
+        self.compression_started.emit()
+        self.preview_button.setEnabled(False)
+        self.compression_progress.emit("Komprimiere Datei...")
+        
+        # Run compression in thread
+        def run_generic_compression():
+            try:
+                import gzip
+                import shutil
+                
+                source_path = self._source_path
+                compressed_path = self._compressed_path
+                
+                if not source_path or not compressed_path:
+                    return False
+                
+                # Use gzip for generic compression
+                with open(str(source_path), 'rb') as f_in:
+                    gz_path = str(compressed_path) + '.gz'
+                    with gzip.open(gz_path, 'wb', 
+                                 compresslevel=max(1, min(9, compression_level // 10))) as f_out:
+                        shutil.copyfileobj(f_in, f_out)
+                        
+                self._compressed_path = Path(str(compressed_path) + '.gz')
+                return True
+            except Exception as e:
+                print(f"Fehler beim Komprimieren: {e}")
+                return False
+        
+        # Run in thread
+        def on_thread_complete(future):
+            success = future.result()
+            if success and self._compressed_path and self._compressed_path.exists():
+                self.save_button.setEnabled(True)
+                self.replace_button.setEnabled(False)  # Don't allow replacing with compressed file
+                
+                # Show compression stats instead of preview
+                self._update_stats()
+                self.compression_finished.emit(True, "Datei erfolgreich komprimiert!")
+            else:
+                self.compression_finished.emit(False, "Komprimierung fehlgeschlagen.")
+            self.preview_button.setEnabled(True)
+        
+        # Run the compression in a background thread
+        executor = concurrent.futures.ThreadPoolExecutor(max_workers=1)
+        future = executor.submit(run_generic_compression)
+        
+        # Use Qt timer to check result
+        from PySide6.QtCore import QTimer
+        timer = QTimer(self)
+        timer.setSingleShot(True)
+        timer.setInterval(100)  # 100 ms
+        
+        def check_future():
+            if future.done():
+                on_thread_complete(future)
+                timer.stop()
+            else:
+                timer.start()
+                
+        timer.timeout.connect(check_future)
+        timer.start()
+
+    def _generate_image_preview(self) -> None:
+        """Generate image compression preview."""
+        if not self._source_path:
+            return
+            
         # Create temporary compressed file
         target_format = self.format_combo.currentText()
         quality = self.quality_slider.value()
@@ -344,6 +715,9 @@ class ImageCompressionWidget(QWidget):
         if not self._compressed_path or not self._compressed_path.exists():
             return
         
+        if not self._source_path:
+            return
+            
         target_format = self.format_combo.currentText()
         default_name = f"{self._source_path.stem}_compressed.{target_format}"
         
@@ -378,20 +752,28 @@ class ImageCompressionWidget(QWidget):
         
         if reply == QMessageBox.StandardButton.Yes:
             import shutil
-            backup_path = self._source_path.with_suffix(self._source_path.suffix + ".backup")
-            shutil.move(str(self._source_path), str(backup_path))
-            shutil.copy2(self._compressed_path, self._source_path)
             
-            QMessageBox.information(
-                self,
-                "Ersetzt",
-                f"Original wurde ersetzt.\nBackup: {backup_path.name}"
-            )
-            
-            # Reload original preview
-            self.original_preview.set_image(self._source_path)
-            self.compressed_preview.clear()
-            self.save_button.setEnabled(False)
+            if not self._source_path or not self._compressed_path:
+                QMessageBox.critical(self, "Fehler", "Quell- oder Zieldatei nicht gefunden.")
+                return
+                
+            try:
+                backup_path = self._source_path.with_suffix(self._source_path.suffix + ".backup")
+                shutil.move(str(self._source_path), str(backup_path))
+                shutil.copy2(str(self._compressed_path), str(self._source_path))
+                
+                QMessageBox.information(
+                    self,
+                    "Ersetzt",
+                    f"Original wurde ersetzt.\nBackup: {backup_path.name}"
+                )
+                
+                # Reload original preview
+                self.original_preview.set_image(self._source_path)
+                self.compressed_preview.clear()
+                self.save_button.setEnabled(False)
+            except Exception as e:
+                QMessageBox.critical(self, "Fehler", f"Fehler beim Ersetzen der Originaldatei: {e}")
             self.replace_button.setEnabled(False)
     
     def dragEnterEvent(self, event: QDragEnterEvent) -> None:

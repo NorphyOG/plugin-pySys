@@ -1,8 +1,12 @@
 """
 Disk Integrity Monitor for Windows using S.M.A.R.T. data.
 
-Retrieves disk health information via WMIC/PowerShell and displays
+Retrieves disk health information via WMI (using PowerShell or WMIC fallback) and displays
 key metrics like temperature, reallocated sectors, power-on hours, etc.
+
+Note: WMIC is deprecated since Windows 10 version 21H1 and Windows Server 21H1, 
+and is being replaced by PowerShell for WMI. This module supports both methods
+with a preference for PowerShell when available.
 """
 from __future__ import annotations
 
@@ -15,7 +19,7 @@ from datetime import datetime
 from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel, QPushButton,
     QTableWidget, QTableWidgetItem, QGroupBox, QComboBox,
-    QTextEdit, QHeaderView
+    QTextEdit, QHeaderView, QMessageBox
 )
 from PySide6.QtCore import Qt, Signal
 from PySide6.QtGui import QColor
@@ -89,21 +93,21 @@ class DiskMonitorWindows(DiskMonitorBase):
     """Backend for retrieving disk health information on Windows."""
     
     def __init__(self):
-        self._available = self._check_availability()
+        from .tools import ToolDetector
+        self._tool_detector = ToolDetector()
+        # Check for both WMIC (legacy) and PowerShell
+        self._wmic_tool = self._tool_detector.detect("wmic")
+        self._powershell_tool = self._tool_detector.detect("powershell")
+        
+        # We can use either PowerShell or WMIC (deprecated but still available)
+        self._use_powershell = self._powershell_tool.available
+        self._use_wmic = self._wmic_tool.available and not self._use_powershell  # Fallback to WMIC if PowerShell not available
+        
+        self._available = self._use_powershell or self._use_wmic
     
     def _check_availability(self) -> bool:
-        """Check if WMIC is available (Windows only)."""
-        try:
-            result = subprocess.run(
-                ["wmic", "diskdrive", "get", "model"],
-                capture_output=True,
-                text=True,
-                timeout=5,
-                creationflags=subprocess.CREATE_NO_WINDOW if hasattr(subprocess, 'CREATE_NO_WINDOW') else 0
-            )
-            return result.returncode == 0
-        except Exception:
-            return False
+        """Check if WMI querying is available (via PowerShell or WMIC)."""
+        return self._available
     
     @property
     def is_available(self) -> bool:
@@ -117,9 +121,28 @@ class DiskMonitorWindows(DiskMonitorBase):
         
         disks = []
         try:
-            # Get disk information via WMIC
+            if self._use_powershell:
+                # Get disk information via PowerShell WMI
+                ps_command = 'Get-WmiObject -Class Win32_DiskDrive | Select-Object Index, Model, SerialNumber, Size, InterfaceType, Status | ConvertTo-Csv -NoTypeInformation'
+                cmd = [
+                    self._powershell_tool.path or "powershell.exe",
+                    "-NoProfile",
+                    "-NonInteractive",
+                    "-Command",
+                    ps_command
+                ]
+            else:
+                # Fallback to WMIC (legacy, deprecated in Windows 10 21H1+)
+                cmd = [
+                    self._wmic_tool.path or "wmic", 
+                    "diskdrive", 
+                    "get", 
+                    "Index,Model,SerialNumber,Size,InterfaceType,Status", 
+                    "/format:csv"
+                ]
+                
             result = subprocess.run(
-                ["wmic", "diskdrive", "get", "Index,Model,SerialNumber,Size,InterfaceType,Status", "/format:csv"],
+                cmd,
                 capture_output=True,
                 text=True,
                 timeout=10,
@@ -143,11 +166,19 @@ class DiskMonitorWindows(DiskMonitorBase):
                     continue
                 
                 try:
-                    # Format: Node,Index,InterfaceType,Model,SerialNumber,Size,Status
-                    index = int(parts[1]) if parts[1] else 0
-                    interface = parts[2] or "Unknown"
-                    model = parts[3] or "Unknown Disk"
-                    serial = parts[4] or "N/A"
+                    if self._use_powershell:
+                        # PowerShell CSV format: "Index","Model","SerialNumber","Size","InterfaceType","Status"
+                        # We need to handle quoted values
+                        index = int(parts[0].strip('"')) if parts[0].strip('"') else 0
+                        model = parts[1].strip('"') or "Unknown Disk"
+                        serial = parts[2].strip('"') or "N/A"
+                        interface = parts[4].strip('"') or "Unknown"
+                    else:
+                        # WMIC CSV format: Node,Index,InterfaceType,Model,SerialNumber,Size,Status
+                        index = int(parts[1]) if parts[1] else 0
+                        interface = parts[2] or "Unknown"
+                        model = parts[3] or "Unknown Disk"
+                        serial = parts[4] or "N/A"
                     size_bytes = int(parts[5]) if parts[5] else 0
                     size_gb = size_bytes / (1024**3) if size_bytes > 0 else 0
                     status = parts[6] or "Unknown"
@@ -170,7 +201,7 @@ class DiskMonitorWindows(DiskMonitorBase):
     
     def get_smart_attributes(self, disk_index: int) -> List[SmartAttribute]:
         """
-        Get S.M.A.R.T. attributes for a disk using WMIC.
+        Get S.M.A.R.T. attributes for a disk using PowerShell or WMIC.
         
         This method queries the `MSStorageDriver_FailurePredictData` class.
         Note: This requires admin privileges to run correctly on some systems.
@@ -180,16 +211,28 @@ class DiskMonitorWindows(DiskMonitorBase):
 
         attributes = []
         try:
-            # This command needs to be run with admin rights to get the data
-            cmd = [
-                "wmic",
-                "/namespace:\\\\root\\wmi",
-                "path",
-                "MSStorageDriver_FailurePredictData",
-                "get",
-                "InstanceName, PredictorId, CurrentValue, Threshold, WorstValue",
-                "/format:csv"
-            ]
+            if self._use_powershell:
+                # PowerShell version to query the WMI data
+                ps_command = 'Get-WmiObject -Namespace "root\\wmi" -Class MSStorageDriver_FailurePredictData | Select-Object InstanceName, PredictorId, CurrentValue, Threshold, WorstValue | ConvertTo-Csv -NoTypeInformation'
+                cmd = [
+                    self._powershell_tool.path or "powershell.exe",
+                    "-NoProfile",
+                    "-NonInteractive",
+                    "-Command",
+                    ps_command
+                ]
+            else:
+                # Fallback to WMIC (legacy, deprecated in Windows 10 21H1+)
+                cmd = [
+                    self._wmic_tool.path or "wmic",
+                    "/namespace:\\\\root\\wmi",
+                    "path",
+                    "MSStorageDriver_FailurePredictData",
+                    "get",
+                    "InstanceName, PredictorId, CurrentValue, Threshold, WorstValue",
+                    "/format:csv"
+                ]
+            
             result = subprocess.run(
                 cmd,
                 capture_output=True,
@@ -525,6 +568,10 @@ class DiskMonitorWidget(QWidget):
             warning = QLabel(f"⚠️ Disk monitoring nicht verfügbar ({platform_name} / {tool_name} benötigt)")
             warning.setStyleSheet("color: orange; font-weight: bold;")
             status_layout.addWidget(warning)
+            
+            install_btn = QPushButton("🔧 Tool installieren")
+            install_btn.clicked.connect(self._install_required_tool)
+            status_layout.addWidget(install_btn)
         else:
             status_label = QLabel("✅ Disk Monitoring verfügbar")
             status_label.setStyleSheet("color: green;")
@@ -705,3 +752,42 @@ class DiskMonitorWidget(QWidget):
     def set_enabled(self, enabled: bool):
         """Enable or disable the widget."""
         self.setEnabled(enabled)
+    
+    def _install_required_tool(self):
+        """Help the user install the required tool for disk monitoring."""
+        platform_name = platform.system()
+        
+        if platform_name == "Windows":
+            # WMIC is built into Windows, but might need enabling
+            message_box = QMessageBox(self)
+            message_box.setIcon(QMessageBox.Icon.Information)
+            message_box.setWindowTitle("WMIC Installation")
+            message_box.setText("WMIC (Windows Management Instrumentation Command-line) sollte standardmäßig in Windows verfügbar sein.")
+            message_box.setInformativeText("Wenn WMIC nicht verfügbar ist, versuchen Sie bitte folgende Schritte:\n\n"
+                                          "1. Öffnen Sie die Systemsteuerung\n"
+                                          "2. Gehen Sie zu 'Programme und Funktionen' > 'Windows-Funktionen aktivieren oder deaktivieren'\n"
+                                          "3. Stellen Sie sicher, dass 'Windows Management Instrumentation (WMI)' aktiviert ist\n"
+                                          "4. Starten Sie den Computer neu\n\n"
+                                          "Alternativ können Sie auch eine Administratorkommandozeile öffnen und eingeben:\n"
+                                          "dism /online /enable-feature /featurename:WMI-WINMGMT")
+            message_box.setStandardButtons(QMessageBox.StandardButton.Ok)
+            message_box.exec()
+        else:
+            # Linux - help install smartmontools
+            message_box = QMessageBox(self)
+            message_box.setIcon(QMessageBox.Icon.Information)
+            message_box.setWindowTitle("smartctl Installation")
+            message_box.setText("Für die Festplattenüberwachung unter Linux wird 'smartmontools' benötigt.")
+            message_box.setInformativeText("Installieren Sie das Paket mit einem der folgenden Befehle:\n\n"
+                                         "Ubuntu/Debian:\n"
+                                         "sudo apt-get install smartmontools\n\n"
+                                         "Fedora/RHEL:\n"
+                                         "sudo dnf install smartmontools\n\n"
+                                         "Arch Linux:\n"
+                                         "sudo pacman -S smartmontools\n\n"
+                                         "Nach der Installation starten Sie bitte die Anwendung neu.")
+            message_box.setStandardButtons(QMessageBox.StandardButton.Ok)
+            message_box.exec()
+        
+        # Refresh after showing installation instructions
+        self._refresh()

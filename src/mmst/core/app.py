@@ -1,8 +1,16 @@
 from __future__ import annotations
 
+import logging
+import os
 import sys
+import traceback
+import threading
+import time
 from dataclasses import dataclass
-from typing import Any, Dict, Optional, TYPE_CHECKING
+from typing import Any, Dict, Optional, TYPE_CHECKING, List
+from pathlib import Path
+
+from .console_logger import ConsoleLogger
 
 if TYPE_CHECKING:  # pragma: no cover
     from PySide6.QtCore import Qt
@@ -490,11 +498,21 @@ class DashboardWindow(QMainWindow):
 
 
 def main() -> int:
+    # Initialize the ConsoleLogger before anything else
+    console_logger = ConsoleLogger.get_instance()
+    console_logger.register_excepthook()
+    logger = console_logger.get_logger("MMST")
+    
+    logger.info("MMST Dashboard starting")
+    
     app = QApplication(sys.argv)
     services = CoreServices()
     manager = PluginManager(services=services)
     window = DashboardWindow(services=services, manager=manager)
     window.show()
+    
+    logger.info("MMST Dashboard UI initialized")
+    
     return app.exec()
 
 

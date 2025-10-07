@@ -32,6 +32,8 @@ class ToolDetector:
     TOOLS = {
         "ffmpeg": ["ffmpeg", "-version"],
         "imagemagick": ["magick", "-version"] if platform.system() == "Windows" else ["convert", "-version"],
+        "wmic": ["wmic", "/?"] if platform.system() == "Windows" else ["echo", "wmic-not-available"],
+        "powershell": ["powershell.exe", "-Command", "$PSVersionTable.PSVersion.ToString()"] if platform.system() == "Windows" else ["echo", "powershell-not-available"],
     }
 
     def __init__(self) -> None:
@@ -89,6 +91,39 @@ class ToolDetector:
                     return str(magick_exe)
         return None
 
+    def get_installation_info(self, tool_name: str) -> dict:
+        """Get installation information for a specific tool."""
+        if tool_name == "imagemagick":
+            if platform.system() == "Windows":
+                return {
+                    "name": "ImageMagick",
+                    "title": "ImageMagick Installation",
+                    "description": "ImageMagick wird für die Bildbearbeitung benötigt.",
+                    "install_instructions": "Bitte laden Sie ImageMagick von der offiziellen Website herunter und installieren Sie es:\n\n"
+                                          "1. Besuchen Sie https://imagemagick.org/script/download.php\n"
+                                          "2. Laden Sie den Windows-Installer herunter (z.B. ImageMagick-7.x.x-Q16-HDRI-x64-dll.exe)\n"
+                                          "3. Führen Sie den Installer aus und aktivieren Sie die Option 'Install legacy utilities' und 'Add application directory to your system path'\n"
+                                          "4. Starten Sie nach der Installation Ihre Anwendung neu.",
+                    "download_url": "https://imagemagick.org/script/download.php"
+                }
+            else:
+                return {
+                    "name": "ImageMagick",
+                    "title": "ImageMagick Installation",
+                    "description": "ImageMagick wird für die Bildbearbeitung benötigt.",
+                    "install_instructions": "Installieren Sie ImageMagick mit einem der folgenden Befehle:\n\n"
+                                         "Ubuntu/Debian:\n"
+                                         "sudo apt-get install imagemagick\n\n"
+                                         "Fedora/RHEL:\n"
+                                         "sudo dnf install imagemagick\n\n"
+                                         "Arch Linux:\n"
+                                         "sudo pacman -S imagemagick\n\n"
+                                         "Nach der Installation starten Sie bitte die Anwendung neu.",
+                    "download_url": "https://imagemagick.org/script/download.php"
+                }
+        
+        return {"name": tool_name, "title": f"{tool_name} Installation", "description": f"Das Tool {tool_name} wird benötigt.", "install_instructions": "Bitte installieren Sie das Tool über den Paketmanager Ihres Systems."}
+    
     def _get_version(self, command_parts: List[str]) -> Optional[str]:
         try:
             result = subprocess.run(

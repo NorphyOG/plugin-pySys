@@ -2,6 +2,13 @@ from __future__ import annotations
 
 import logging
 import os
+import sys
+import threading
+import time
+import json
+import tempfile
+import webbrowser
+from datetime import datetime
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable, Dict, Iterable, List, Optional
@@ -10,6 +17,7 @@ from .config import ConfigStore, PluginConfig
 from .audio import AudioDeviceService
 from .events import EventBus
 from .progress import ProgressTracker
+from .console_logger import ConsoleLogger, setup_logging
 
 
 class NotificationCenter:
@@ -72,15 +80,26 @@ class CoreServices:
 
     @staticmethod
     def _configure_logger(app_name: str) -> logging.Logger:
-        logger = logging.getLogger(app_name)
-        if not logger.handlers:
-            handler = logging.StreamHandler()
-            formatter = logging.Formatter(
-                "%(asctime)s | %(name)s | %(levelname)s | %(message)s"
-            )
-            handler.setFormatter(formatter)
-            logger.addHandler(handler)
-        logger.setLevel(logging.INFO)
+        """Configure the application logger using the enhanced ConsoleLogger.
+        
+        This sets up both console and file logging with proper formatting.
+        
+        Args:
+            app_name: The name of the application to use in log messages.
+            
+        Returns:
+            The configured logger instance.
+        """
+        # Use the enhanced ConsoleLogger
+        console_logger = setup_logging(app_name=app_name)
+        
+        # Get the application logger
+        logger = console_logger.get_logger(app_name)
+        
+        # Log startup information
+        logger.info(f"{app_name} starting up")
+        logger.debug(f"Log files located at: {console_logger.get_log_file_path()}")
+        
         return logger
 
     @property

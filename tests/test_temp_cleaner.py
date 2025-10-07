@@ -26,6 +26,14 @@ def test_temp_cleaner_scan_and_delete(tmp_path: Path):
     report = cleaner.delete(result, dry_run=True, categories=["custom"])
     assert report["custom"]["files"] == 3
     assert report["custom"]["size"] == total_size
+    # Verify deleted files are tracked
+    assert "deleted_files" in report["custom"]
+    assert len(report["custom"]["deleted_files"]) == 3
+    # Check all expected files are in deleted_files
+    file_paths = [str(f) for f in files]
+    for path in report["custom"]["deleted_files"]:
+        assert path in file_paths
+    # Ensure files still exist after dry run
     for f in files:
         assert f.exists()
     # Real delete with age threshold too high -> nothing
@@ -36,5 +44,9 @@ def test_temp_cleaner_scan_and_delete(tmp_path: Path):
     # Real delete without threshold
     report3 = cleaner.delete(result, dry_run=False, categories=["custom"], min_age_seconds=0)
     assert report3["custom"]["files"] == 3
+    # Verify deleted_files are tracked in real delete
+    assert "deleted_files" in report3["custom"]
+    assert len(report3["custom"]["deleted_files"]) == 3
+    # Verify the files are actually deleted
     for f in files:
         assert not f.exists()
